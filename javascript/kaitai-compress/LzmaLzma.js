@@ -1,20 +1,27 @@
+// npm: lzma (encoder only; decoding uses ./LzmaDecoder)
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
-        define(['kaitai-struct/KaitaiStream', 'lzma'], factory);
+        define(['./LzmaDecoder', 'lzma'], factory);
     } else if (typeof module === 'object' && module.exports) {
-        module.exports = factory(require('kaitai-struct/KaitaiStream'), require('lzma'));
+        module.exports = factory(require('./LzmaDecoder'), require('lzma'));
     } else {
-        root.LzmaLzma = factory(root.KaitaiStream, LZMA);
+        root.LzmaLzma = factory(root.LzmaDecoder, root.LZMA);
     }
-}(this, function (KaitaiStream, RealLZMA) {
-    var LzmaLzma = (function() {
-        function LzmaLzma() {
-        }
-        LzmaLzma.prototype.decode = function(src) {
-            return RealLZMA.decompress(src);
-        }
+}(typeof self !== 'undefined' ? self : this, function (LzmaDecoder, LZMA) {
+    function LzmaLzma() {
+    }
 
-        return LzmaLzma;
-    })();
+    // Legacy .lzma ("LZMA alone") format
+    LzmaLzma.prototype.decode = function(data) {
+        return LzmaDecoder.decodeLzmaAlone(data);
+    };
+
+    LzmaLzma.prototype.encode = function(data) {
+        // LZMA-JS returns an array of signed bytes; 6 is its compression mode (1..9)
+        return new Uint8Array(LZMA.compress(data, 6));
+    };
+
+    // ksc >= 0.11 generated code does `new LzmaLzma_.LzmaLzma()`, older code does `new LzmaLzma()`
+    LzmaLzma.LzmaLzma = LzmaLzma;
     return LzmaLzma;
 }));
