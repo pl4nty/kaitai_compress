@@ -1,11 +1,6 @@
-#!/bin/sh
-
-# Can't use "-t all" due to ksc 0.9 PerlCompiler having a bug resulting in an unrecoverable exception
-ksc \
-	--verbose file \
-	-t javascript \
-	-t python \
-	-t ruby \
-	--ksc-exceptions \
-	--outdir compiled \
-	ksy/*.ksy
+#!/bin/sh -e
+# Python is compiled with --read-write so the tests also exercise encode().
+# ksc 0.11 supports --read-write only for Java and Python.
+KSC="${KSC:-kaitai-struct-compiler}"
+"$KSC" --verbose file -t javascript -t ruby --ksc-exceptions --outdir compiled ksy/*.ksy
+"$KSC" --verbose file -t python --read-write --ksc-exceptions --outdir compiled/python ksy/*.ksy
