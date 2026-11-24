@@ -12,7 +12,8 @@ RUN apt-get install -y --no-install-recommends \
 	zlib1g-dev \
 	libsnappy-dev \
 	liblzma-dev \
-	libbz2-dev
+	libbz2-dev \
+	libssl-dev
 
 # Check ruby version
 RUN ruby --version | grep -q '^ruby 3\.2' && echo "Version check OK"
