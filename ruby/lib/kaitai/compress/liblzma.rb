@@ -1,4 +1,4 @@
-# RubyGems: ruby-xz >= 1 (used for its liblzma binding)
+# RubyGems: ruby-xz >= 1 (used for its Fiddle binding of liblzma)
 #
 # ruby-xz only exposes the .xz container. This helper binds the few extra
 # liblzma functions needed for legacy .lzma ("alone") and raw LZMA2 streams
@@ -16,28 +16,59 @@ module Kaitai
       L.extern "lzma_ret lzma_raw_encoder(lzma_stream*, void*)"
       L.extern "unsigned char lzma_lzma_preset(void*, uint32_t)"
 
+      # lzma_filter; a filter chain is an array of these ending with id
+      # LZMA_VLI_UNKNOWN.
+      Filter = L.struct ["uint64_t id", "void* options"]
       FILTER_LZMA2 = 0x21
       VLI_UNKNOWN = L::UINT64_MAX
+
       PRESET = 6
+      OPTIONS_SIZE = 256 # generously more than sizeof(lzma_options_lzma)
       CHUNK_SIZE = 64 * 1024
-      OPTIONS_SIZE = 256 # >= sizeof(lzma_options_lzma)
+
+      ERRORS = {
+        L::LZMA_MEM_ERROR => "out of memory",
+        L::LZMA_MEMLIMIT_ERROR => "memory limit reached",
+        L::LZMA_FORMAT_ERROR => "unrecognized format",
+        L::LZMA_OPTIONS_ERROR => "unsupported options",
+        L::LZMA_DATA_ERROR => "corrupt data",
+        L::LZMA_BUF_ERROR => "truncated stream", # no progress possible
+        L::LZMA_PROG_ERROR => "programming error",
+      }.freeze
 
       module_function
 
-      # Runs `data` through a stream set up by the block (which gets the
-      # lzma_stream pointer and preset options pointer, and returns an
-      # lzma_ret).
+      def alone_decode(data)
+        code(data) { |stream, _| L.lzma_alone_decoder(stream, L::UINT64_MAX) }
+      end
+
+      def alone_encode(data)
+        code(data) { |stream, options| L.lzma_alone_encoder(stream, options) }
+      end
+
+      def raw_decode(data)
+        code(data) { |stream, options| L.lzma_raw_decoder(stream, lzma2_filters(options)) }
+      end
+
+      def raw_encode(data)
+        code(data) { |stream, options| L.lzma_raw_encoder(stream, lzma2_filters(options)) }
+      end
+
+      # Runs all of `data` through a coder. The block initialises it: it gets
+      # the lzma_stream pointer and a pointer to the preset's
+      # lzma_options_lzma, and returns an lzma_ret. liblzma copies what it
+      # needs from the options during initialisation.
       def code(data)
         stream = L::LZMAStream.malloc
         L.LZMA_STREAM_INIT(stream)
-        options = Fiddle::Pointer.malloc(OPTIONS_SIZE)
+        options = buffer(OPTIONS_SIZE)
         options[0, OPTIONS_SIZE] = "\0".b * OPTIONS_SIZE
-        raise Error, "liblzma: lzma_lzma_preset failed" if L.lzma_lzma_preset(options, PRESET) != 0
+        raise Error, "liblzma: unsupported preset #{PRESET}" if L.lzma_lzma_preset(options, PRESET) != 0
         check(yield(stream.to_ptr, options))
 
-        input = Fiddle::Pointer.malloc([data.bytesize, 1].max)
-        input[0, data.bytesize] = data unless data.empty?
-        output = Fiddle::Pointer.malloc(CHUNK_SIZE)
+        input = buffer(data.bytesize)
+        input[0, data.bytesize] = data
+        output = buffer(CHUNK_SIZE)
         stream.next_in = input
         stream.avail_in = data.bytesize
         out = "".b
@@ -46,51 +77,36 @@ module Kaitai
           stream.avail_out = CHUNK_SIZE
           ret = L.lzma_code(stream.to_ptr, L::LZMA_FINISH)
           out << output[0, CHUNK_SIZE - stream.avail_out]
-          break if ret == L::LZMA_STREAM_END
-          raise Error, "liblzma: truncated stream" if ret == L::LZMA_BUF_ERROR
+          return out if ret == L::LZMA_STREAM_END
           check(ret)
         end
-        out
       ensure
-        L.lzma_end(stream.to_ptr) if stream
-        [stream&.to_ptr, options, input, output].compact.each { |p| Fiddle.free(p) }
+        if stream
+          L.lzma_end(stream.to_ptr)
+          Fiddle.free(stream.to_ptr)
+        end
       end
 
-      # lzma_filter[2] for a single LZMA2 filter with preset options.
+      # lzma_filter[2]: a single LZMA2 filter with the given options.
       def lzma2_filters(options)
-        f = Fiddle::Pointer.malloc(32)
-        f[0, 32] = [FILTER_LZMA2, options.to_i, VLI_UNKNOWN, 0].pack('QQQQ')
-        f
+        chain = buffer(2 * Filter.size)
+        lzma2 = Filter.new(chain)
+        lzma2.id = FILTER_LZMA2
+        lzma2.options = options
+        terminator = Filter.new(chain + Filter.size)
+        terminator.id = VLI_UNKNOWN
+        terminator.options = nil
+        chain
+      end
+
+      # Uninitialised memory that is freed when the pointer is collected.
+      def buffer(size)
+        Fiddle::Pointer.malloc([size, 1].max, Fiddle::RUBY_FREE)
       end
 
       def check(ret)
         return if ret == L::LZMA_OK
-        ::XZ::LZMAError.raise_if_necessary(ret)
-        raise Error, "liblzma: error code #{ret}"
-      rescue ::XZ::LZMAError => e
-        raise Error, "liblzma: #{e.message}"
-      end
-
-      def alone_decode(data)
-        code(data) { |s, _| L.lzma_alone_decoder(s, L::UINT64_MAX) }
-      end
-
-      def alone_encode(data)
-        code(data) { |s, o| L.lzma_alone_encoder(s, o) }
-      end
-
-      def raw_decode(data)
-        filters = nil
-        code(data) { |s, o| L.lzma_raw_decoder(s, filters = lzma2_filters(o)) }
-      ensure
-        Fiddle.free(filters) if filters
-      end
-
-      def raw_encode(data)
-        filters = nil
-        code(data) { |s, o| L.lzma_raw_encoder(s, filters = lzma2_filters(o)) }
-      ensure
-        Fiddle.free(filters) if filters
+        raise Error, "liblzma: #{ERRORS.fetch(ret, "error code #{ret}")}"
       end
     end
   end

@@ -10,31 +10,24 @@ module Kaitai
     # encrypts.
     class BlockCipher
       # algorithm => [block size, {key length => OpenSSL cipher name prefix}]
+      TRIPLE_DES = [8, {16 => 'des-ede', 24 => 'des-ede3'}].freeze
       ALGORITHMS = {
         'des' => [8, {8 => 'des'}],
-        '3des' => [8, {16 => 'des-ede', 24 => 'des-ede3'}],
-        'des3' => [8, {16 => 'des-ede', 24 => 'des-ede3'}],
+        '3des' => TRIPLE_DES,
+        'des3' => TRIPLE_DES,
         'aes' => [16, {16 => 'aes-128', 24 => 'aes-192', 32 => 'aes-256'}],
       }.freeze
       MODES = %w[ecb cbc].freeze
       PADDINGS = %w[pkcs7 none].freeze
 
       def initialize(algorithm, mode, key, iv = nil, padding = 'pkcs7')
-        unless ALGORITHMS.key?(algorithm.downcase)
-          raise ArgumentError, "block_cipher: unknown algorithm #{algorithm.inspect}, expected one of #{ALGORITHMS.keys.join(', ')}"
-        end
-        @block_size, names = ALGORITHMS[algorithm.downcase]
-        @mode = mode.downcase
-        MODES.include?(@mode) or
-          raise ArgumentError, "block_cipher: unknown mode #{mode.inspect}, expected one of #{MODES.join(', ')}"
-        @padding = padding.downcase
-        PADDINGS.include?(@padding) or
-          raise ArgumentError, "block_cipher: unknown padding #{padding.inspect}, expected one of #{PADDINGS.join(', ')}"
+        @block_size, key_sizes = ALGORITHMS[choose('algorithm', algorithm, ALGORITHMS.keys)]
+        @mode = choose('mode', mode, MODES)
+        @padding = choose('padding', padding, PADDINGS)
         @key = key.b
-        prefix = names[@key.bytesize] or
-          raise ArgumentError, "block_cipher: #{algorithm} key must be #{names.keys.join(' or ')} bytes, got #{@key.bytesize}"
+        prefix = key_sizes[@key.bytesize] or
+          raise ArgumentError, "block_cipher: #{algorithm} key must be #{key_sizes.keys.join(' or ')} bytes, got #{@key.bytesize}"
         @name = cipher_name(prefix)
-        @iv = nil
         if @mode == 'cbc'
           raise ArgumentError, "block_cipher: cbc mode requires an iv" if iv.nil?
           @iv = iv.b
@@ -42,7 +35,7 @@ module Kaitai
             raise ArgumentError, "block_cipher: iv must be #{@block_size} bytes, got #{@iv.bytesize}"
           end
         end
-        new_cipher(:encrypt) # fail early if OpenSSL lacks the algorithm
+        ensure_supported
       end
 
       def decode(data)
@@ -63,6 +56,11 @@ module Kaitai
       end
 
       private
+
+      def choose(what, value, allowed)
+        return value.downcase if allowed.include?(value.downcase)
+        raise ArgumentError, "block_cipher: unknown #{what} #{value.inspect}, expected one of #{allowed.join(', ')}"
+      end
 
       def cipher_name(prefix)
         # OpenSSL names: des-ecb, des-cbc, des-ede/des-ede3 (ECB),
@@ -95,7 +93,7 @@ module Kaitai
       end
 
       def new_cipher(direction)
-        c = self.class.openssl_cipher(@name)
+        c = OpenSSL::Cipher.new(@name)
         c.public_send(direction)
         c.padding = 0
         c.key = @key
@@ -103,19 +101,20 @@ module Kaitai
         c
       end
 
-      # OpenSSL 3 moved DES to the "legacy" provider; load it once on demand.
-      def self.openssl_cipher(name)
-        OpenSSL::Cipher.new(name)
-      rescue OpenSSL::Cipher::CipherError, RuntimeError
-        raise if @legacy_loaded || !defined?(OpenSSL::Provider)
-        @legacy_loaded = true
+      # Fails early if OpenSSL lacks the cipher. OpenSSL 3 moved DES to its
+      # "legacy" provider, which is loaded here on demand (together with
+      # "default", which is no longer implied once a provider is loaded
+      # explicitly).
+      def ensure_supported
+        new_cipher(:encrypt)
+      rescue OpenSSL::Cipher::CipherError, RuntimeError => e
         begin
           OpenSSL::Provider.load('legacy')
           OpenSSL::Provider.load('default')
-        rescue OpenSSL::Provider::ProviderError
-          raise ArgumentError, "block_cipher: OpenSSL does not support #{name} (legacy provider unavailable)"
+          new_cipher(:encrypt)
+        rescue NameError, OpenSSL::OpenSSLError, RuntimeError
+          raise ArgumentError, "block_cipher: OpenSSL does not support #{@name} (#{e.message})"
         end
-        OpenSSL::Cipher.new(name)
       end
     end
   end
