@@ -3,9 +3,9 @@
 //
 // Format: https://tukaani.org/xz/xz-file-format.txt
 // Supported: one or more concatenated streams (with stream padding), any
-// number of blocks, the LZMA2 filter alone (no BCJ/delta filters), and the
-// none/CRC32/CRC64/SHA-256 checks (CRC32 and CRC64 are verified; SHA-256 is
-// skipped).
+// number of blocks, the LZMA2 filter alone (no BCJ/delta filters). All header,
+// index and footer fields are verified, and so are CRC32 and CRC64 block
+// checks; a SHA-256 block check is skipped.
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
         define(['./LzmaDecoder'], factory);
@@ -65,25 +65,39 @@
         return (data[pos] | (data[pos + 1] << 8) | (data[pos + 2] << 16) | (data[pos + 3] << 24)) >>> 0;
     }
 
+    function concat(chunks) {
+        var total = 0, i;
+        for (i = 0; i < chunks.length; i++) {
+            total += chunks[i].length;
+        }
+        var out = new Uint8Array(total);
+        var pos = 0;
+        for (i = 0; i < chunks.length; i++) {
+            out.set(chunks[i], pos);
+            pos += chunks[i].length;
+        }
+        return out;
+    }
+
     function fail(msg) {
         throw new Error("LzmaXz: " + msg);
     }
 
-    // Reads a multibyte integer; returns [value, next position]
-    function readVarint(data, pos, end) {
+    // Reads a multibyte integer at cursor `cur` ({pos, end}) and advances it
+    function readVarint(data, cur) {
         var value = 0, mul = 1;
         for (var i = 0; i < 9; i++) {
-            if (pos >= end) {
+            if (cur.pos >= cur.end) {
                 fail("truncated integer");
             }
-            var b = data[pos++];
+            var b = data[cur.pos++];
             value += (b & 0x7F) * mul;
             mul *= 128;
             if ((b & 0x80) === 0) {
                 if (b === 0 && i > 0) {
                     fail("non-minimal integer encoding");
                 }
-                return [value, pos];
+                return value;
             }
         }
         fail("integer is too long");
@@ -109,10 +123,10 @@
         }
     }
 
-    // Decodes one block starting at `pos`; returns [Uint8Array, next position]
-    function decodeBlock(data, pos, streamStart, checkType) {
-        var headerSize = (data[pos] + 1) * 4;
-        var headerEnd = pos + headerSize;
+    // Decodes one block starting at `pos`. Returns its data, the position
+    // after it and its "unpadded size" (as recorded in the index).
+    function decodeBlock(data, pos, checkType) {
+        var headerEnd = pos + (data[pos] + 1) * 4;
         if (headerEnd > data.length) {
             fail("truncated block header");
         }
@@ -123,72 +137,73 @@
         if (flags & 0x3C) {
             fail("unsupported block flags");
         }
-        var p = pos + 2, r;
-        var compressedSize = -1, uncompressedSize = -1;
-        if (flags & 0x40) {
-            r = readVarint(data, p, headerEnd - 4); compressedSize = r[0]; p = r[1];
+        if (flags & 0x03) {
+            fail("unsupported filter chain (only a single LZMA2 filter is supported)");
         }
-        if (flags & 0x80) {
-            r = readVarint(data, p, headerEnd - 4); uncompressedSize = r[0]; p = r[1];
+        var cur = { pos: pos + 2, end: headerEnd - 4 };
+        var compressedSize = (flags & 0x40) ? readVarint(data, cur) : -1;
+        var uncompressedSize = (flags & 0x80) ? readVarint(data, cur) : -1;
+        var filterId = readVarint(data, cur);
+        if (filterId !== FILTER_LZMA2) {
+            fail("unsupported filter id 0x" + filterId.toString(16) + " (only LZMA2 is supported)");
         }
-        var numFilters = (flags & 3) + 1;
-        for (var f = 0; f < numFilters; f++) {
-            r = readVarint(data, p, headerEnd - 4); var id = r[0]; p = r[1];
-            r = readVarint(data, p, headerEnd - 4); var propsSize = r[0]; p = r[1];
-            if (id !== FILTER_LZMA2 || numFilters !== 1) {
-                fail("unsupported filter chain (only a single LZMA2 filter is supported, got filter id 0x" + id.toString(16) + ")");
-            }
-            if (propsSize !== 1) {
-                fail("invalid LZMA2 filter properties");
-            }
-            p += propsSize;
+        // the only filter property is the dictionary size, which is not needed
+        if (readVarint(data, cur) !== 1 || cur.pos >= cur.end || data[cur.pos++] > 40) {
+            fail("invalid LZMA2 filter properties");
         }
-        for (; p < headerEnd - 4; p++) {
-            if (data[p] !== 0) {
+        while (cur.pos < cur.end) {
+            if (data[cur.pos++] !== 0) {
                 fail("non-zero block header padding");
             }
         }
 
         var res = LzmaDecoder.decodeLzma2(data, headerEnd, data.length);
         var block = res.data;
-        p = res.end;
+        var p = res.end;
         if (compressedSize >= 0 && p - headerEnd !== compressedSize) {
             fail("compressed size does not match the block header");
         }
         if (uncompressedSize >= 0 && block.length !== uncompressedSize) {
             fail("uncompressed size does not match the block header");
         }
-        while ((p - streamStart) % 4 !== 0) {
+        var checkSize = CHECK_SIZES[checkType];
+        var unpaddedSize = p - pos + checkSize;
+        // blocks start at a multiple of 4 bytes from the start of the stream
+        // and so does `pos`
+        while ((p - pos) % 4 !== 0) {
             if (data[p++] !== 0) {
-                fail("non-zero block padding");
+                fail("non-zero or truncated block padding");
             }
         }
-        var checkSize = CHECK_SIZES[checkType];
         if (p + checkSize > data.length) {
             fail("truncated block check");
         }
         verifyCheck(checkType, block, data, p);
-        return [block, p + checkSize];
+        return { data: block, end: p + checkSize, unpaddedSize: unpaddedSize };
     }
 
-    // Skips and verifies the index starting at `pos` (at its 0x00 indicator)
-    function skipIndex(data, pos, numBlocks) {
-        var start = pos;
-        var r = readVarint(data, pos + 1, data.length);
-        var numRecords = r[0];
-        var p = r[1];
-        if (numRecords !== numBlocks) {
-            fail("index has " + numRecords + " records but the stream has " + numBlocks + " blocks");
+    // Verifies the index starting at `pos` (at its 0x00 indicator) against
+    // the decoded blocks; returns the position after it
+    function checkIndex(data, pos, blocks) {
+        var cur = { pos: pos + 1, end: data.length };
+        var numRecords = readVarint(data, cur);
+        if (numRecords !== blocks.length) {
+            fail("index has " + numRecords + " records but the stream has " + blocks.length + " blocks");
         }
-        for (var i = 0; i < 2 * numRecords; i++) {
-            p = readVarint(data, p, data.length)[1];
-        }
-        while ((p - start) % 4 !== 0) {
-            if (data[p++] !== 0) {
-                fail("non-zero index padding");
+        for (var i = 0; i < blocks.length; i++) {
+            var unpaddedSize = readVarint(data, cur);
+            var uncompressedSize = readVarint(data, cur);
+            if (unpaddedSize !== blocks[i].unpaddedSize || uncompressedSize !== blocks[i].data.length) {
+                fail("index record " + i + " does not match the block");
             }
         }
-        if (p + 4 > data.length || crc32(data, start, p) !== readU32le(data, p)) {
+        var p = cur.pos;
+        while ((p - pos) % 4 !== 0) {
+            if (data[p++] !== 0) {
+                fail("non-zero or truncated index padding");
+            }
+        }
+        if (p + 4 > data.length || crc32(data, pos, p) !== readU32le(data, p)) {
             fail("CRC32 mismatch in index");
         }
         return p + 4;
@@ -198,12 +213,10 @@
     }
 
     LzmaXz.prototype.decode = function(data) {
-        var blocks = [];
-        var total = 0;
+        var chunks = [];
         var pos = 0;
         do {
             // stream header
-            var streamStart = pos;
             if (pos + 12 > data.length) {
                 fail("truncated stream header");
             }
@@ -218,8 +231,8 @@
             }
             pos += 12;
 
-            // blocks
-            var numBlocks = 0;
+            // blocks, until the index indicator (0x00)
+            var blocks = [];
             while (true) {
                 if (pos >= data.length) {
                     fail("truncated stream");
@@ -227,14 +240,13 @@
                 if (data[pos] === 0) {
                     break;
                 }
-                var r = decodeBlock(data, pos, streamStart, checkType);
-                blocks.push(r[0]);
-                total += r[0].length;
-                pos = r[1];
-                numBlocks++;
+                var block = decodeBlock(data, pos, checkType);
+                blocks.push(block);
+                chunks.push(block.data);
+                pos = block.end;
             }
             var indexStart = pos;
-            pos = skipIndex(data, pos, numBlocks);
+            pos = checkIndex(data, pos, blocks);
 
             // stream footer
             if (pos + 12 > data.length) {
@@ -264,13 +276,7 @@
             }
         } while (pos < data.length);
 
-        var out = new Uint8Array(total);
-        var off = 0;
-        for (var b = 0; b < blocks.length; b++) {
-            out.set(blocks[b], off);
-            off += blocks[b].length;
-        }
-        return out;
+        return concat(chunks);
     };
 
     LzmaXz.prototype.encode = function(data) {

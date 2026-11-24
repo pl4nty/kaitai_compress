@@ -82,7 +82,7 @@
         function bits(need) {
             var val = bitbuf;
             while (bitcnt < need) {
-                if (pos >= data.length) throw new Error('implode: unexpected end of input');
+                if (pos >= data.length) throw new Error('Implode: unexpected end of input');
                 val |= data[pos++] << bitcnt;
                 bitcnt += 8;
             }
@@ -103,7 +103,7 @@
                 first = (first + cnt) << 1;
                 code <<= 1;
             }
-            throw new Error('implode: invalid Huffman code');
+            throw new Error('Implode: invalid Huffman code');
         }
 
         var out = new Uint8Array(Math.max(4096, data.length * 4)), outLen = 0;
@@ -115,9 +115,9 @@
         }
 
         var lit = bits(8);
-        if (lit > 1) throw new Error('implode: literal flag must be 0 or 1, got ' + lit);
+        if (lit > 1) throw new Error('Implode: literal flag must be 0 or 1, got ' + lit);
         var dict = bits(8);
-        if (dict < 4 || dict > 6) throw new Error('implode: dictionary size code must be 4..6, got ' + dict);
+        if (dict < 4 || dict > 6) throw new Error('Implode: dictionary size code must be 4..6, got ' + dict);
 
         while (true) {
             if (bits(1)) {
@@ -128,7 +128,7 @@
 
                 symbol = len === 2 ? 2 : dict;
                 var dist = (huff(DISTCODE) << symbol) + bits(symbol) + 1;
-                if (dist > outLen) throw new Error('implode: distance too far back');
+                if (dist > outLen) throw new Error('Implode: distance too far back');
 
                 // byte-wise forward copy, which also handles overlapping copies
                 reserve(len);
@@ -141,8 +141,7 @@
         return out.slice(0, outLen);
     };
 
-    // ksc 0.11 generated code uses `Implode_.Implode`; older code uses the
-    // module value itself as the class.
+    // ksc >= 0.11 generated code does `new Implode_.Implode()`, older code does `new Implode()`
     Implode.Implode = Implode;
     return Implode;
 }));

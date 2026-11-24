@@ -118,6 +118,18 @@
         this.code = ((input[pos + 1] << 24) | (input[pos + 2] << 16) | (input[pos + 3] << 8) | input[pos + 4]) >>> 0;
         this.range = 0xFFFFFFFF;
         this.inPos = pos + 5;
+        if (this.code === this.range) {
+            throw new Error("LZMA: corrupted range coder header");
+        }
+    };
+
+    // A correctly finished range coder has consumed all of its input and is
+    // left with a zero code.
+    LzmaDecoder.prototype.finishRange = function(mustUseAllInput) {
+        this.normalize();
+        if (this.code !== 0 || (mustUseAllInput && this.inPos !== this.inEnd)) {
+            throw new Error("LZMA: corrupted data at the end of the range coder stream");
+        }
     };
 
     LzmaDecoder.prototype.normalize = function() {
@@ -236,8 +248,6 @@
 
     LzmaDecoder.prototype.copyMatch = function(len, limit) {
         var out = this.out;
-        out.reserve(len);
-        var buf = out.buf;
         var dist = this.rep0 + 1;
         if (dist > out.pos - this.dictStart) {
             throw new Error("LZMA: match distance is beyond the start of the dictionary");
@@ -245,15 +255,17 @@
         if (out.pos + len > limit) {
             throw new Error("LZMA: match goes past the end of the data");
         }
+        out.reserve(len);
+        var buf = out.buf;
         var src = out.pos - dist;
         for (var i = 0; i < len; i++) {
             buf[out.pos++] = buf[src++];
         }
     };
 
-    // Decodes until `limit` output bytes in total exist (absolute position in
-    // the output buffer, may be Infinity), or an end marker is found when `allowEndMarker`.
-    // Returns true if the end marker was found.
+    // Decodes until the output is `limit` bytes long in total (may be Infinity)
+    // or, if `allowEndMarker`, an end marker is found. Returns true if the end
+    // marker was found.
     LzmaDecoder.prototype.decode = function(limit, allowEndMarker) {
         var out = this.out;
         var pbMask = (1 << this.pb) - 1;
@@ -274,6 +286,7 @@
                     if (!allowEndMarker) {
                         throw new Error("LZMA: unexpected end marker");
                     }
+                    this.finishRange(false);
                     return true;
                 }
                 this.rep3 = this.rep2;
@@ -319,7 +332,8 @@
         return (data[pos] | (data[pos + 1] << 8) | (data[pos + 2] << 16) | (data[pos + 3] << 24)) >>> 0;
     }
 
-    // Legacy .lzma ("LZMA alone") file: 13 byte header, then LZMA data.
+    // Legacy .lzma ("LZMA alone") file: properties byte, dictionary size (u4le),
+    // uncompressed size (u8le, all ones if unknown), then LZMA data.
     function decodeLzmaAlone(data) {
         if (data.length < 13) {
             throw new Error("LZMA: truncated header");
@@ -327,91 +341,81 @@
         var sizeLow = readU32le(data, 5);
         var sizeHigh = readU32le(data, 9);
         var knownSize = !(sizeLow === 0xFFFFFFFF && sizeHigh === 0xFFFFFFFF);
-        var size = sizeHigh * 0x100000000 + sizeLow;
+        var size = knownSize ? sizeHigh * 0x100000000 + sizeLow : Infinity;
         if (knownSize && size > 0x7FFFFFFF) {
             throw new Error("LZMA: uncompressed size is too big: " + size);
         }
-        var out = new Output(knownSize ? size : data.length * 4);
+        // the declared size is only a hint: do not allocate gigabytes because
+        // a (possibly corrupt) header says so
+        var out = new Output(Math.min(size, Math.max(data.length * 4, 0x100000)));
         var dec = new LzmaDecoder(out);
         dec.setProperties(data[0]);
         dec.resetState();
-        if (knownSize) {
-            if (size > 0) {
-                dec.initRange(data, 13, data.length);
-                dec.decode(size, true);
-                if (out.pos !== size) {
-                    throw new Error("LZMA: end marker found before the declared size");
-                }
-            }
-        } else {
+        if (size > 0) {
             dec.initRange(data, 13, data.length);
-            dec.decode(Infinity, true);
+            dec.decode(size, true);
+            if (knownSize && out.pos !== size) {
+                throw new Error("LZMA: end marker found before the declared size");
+            }
         }
         return out.result();
     }
 
-    // Raw LZMA2 stream starting at data[pos], ending with a 0x00 control byte.
+    // Raw LZMA2 stream in data[pos..end), ending with a 0x00 control byte.
     // Returns {data: Uint8Array, end: position after the end byte}.
     function decodeLzma2(data, pos, end) {
-        if (end === undefined) {
-            end = data.length;
-        }
         var out = new Output((end - pos) * 4);
         var dec = new LzmaDecoder(out);
         var needDictReset = true;
         var needProps = true;
-        while (true) {
-            if (pos >= end) {
-                throw new Error("LZMA2: truncated input (no end of stream marker)");
+
+        function need(n) {
+            if (pos + n > end) {
+                throw new Error("LZMA2: truncated input");
             }
+        }
+
+        while (true) {
+            need(1);
             var control = data[pos++];
             if (control === 0x00) {
                 return { data: out.result(), end: pos };
             }
-            if (control === 0x01 || control === 0x02) {
-                // uncompressed chunk
-                if (control === 0x01) {
-                    dec.resetDict();
-                    needDictReset = false;
-                } else if (needDictReset) {
-                    throw new Error("LZMA2: missing dictionary reset");
-                }
-                if (pos + 2 > end) {
-                    throw new Error("LZMA2: truncated input");
-                }
-                var usize = ((data[pos] << 8) | data[pos + 1]) + 1;
-                pos += 2;
-                if (pos + usize > end) {
-                    throw new Error("LZMA2: truncated input");
-                }
-                out.reserve(usize);
-                out.buf.set(data.subarray(pos, pos + usize), out.pos);
-                out.pos += usize;
-                pos += usize;
-                continue;
-            }
-            if (control < 0x80) {
-                throw new Error("LZMA2: invalid control byte 0x" + control.toString(16));
-            }
-            if (pos + 4 > end) {
-                throw new Error("LZMA2: truncated input");
-            }
-            var unpacked = ((control & 0x1F) << 16) + ((data[pos] << 8) | data[pos + 1]) + 1;
-            var packed = ((data[pos + 2] << 8) | data[pos + 3]) + 1;
-            pos += 4;
-            var reset = (control >>> 5) & 3;
-            if (reset === 3) {
+            // 0x01: uncompressed chunk with a dictionary reset
+            // 0x02: uncompressed chunk
+            // 0x80..0xFF: LZMA chunk; bits 5-6 say what is reset first:
+            //   0: nothing, 1: state, 2: state + new properties,
+            //   3: state + new properties + dictionary
+            if (control >= 0xE0 || control === 0x01) {
                 dec.resetDict();
                 needDictReset = false;
+                needProps = true;
             } else if (needDictReset) {
                 throw new Error("LZMA2: missing dictionary reset");
             }
-            if (reset >= 2) {
-                if (pos >= end) {
-                    throw new Error("LZMA2: truncated input");
+
+            if (control < 0x80) {
+                if (control > 0x02) {
+                    throw new Error("LZMA2: invalid control byte 0x" + control.toString(16));
                 }
-                var props = data[pos++];
-                dec.setProperties(props);
+                need(2);
+                var size = ((data[pos] << 8) | data[pos + 1]) + 1;
+                pos += 2;
+                need(size);
+                out.reserve(size);
+                out.buf.set(data.subarray(pos, pos + size), out.pos);
+                out.pos += size;
+                pos += size;
+                continue;
+            }
+
+            need(4);
+            var unpacked = (((control & 0x1F) << 16) | (data[pos] << 8) | data[pos + 1]) + 1;
+            var packed = ((data[pos + 2] << 8) | data[pos + 3]) + 1;
+            pos += 4;
+            if (control >= 0xC0) {
+                need(1);
+                dec.setProperties(data[pos++]);
                 if (dec.lc + dec.lp > 4) {
                     throw new Error("LZMA2: lc + lp > 4");
                 }
@@ -419,20 +423,18 @@
             } else if (needProps) {
                 throw new Error("LZMA2: missing properties");
             }
-            if (reset >= 1) {
+            if (control >= 0xA0) {
                 dec.resetState();
             }
-            if (pos + packed > end) {
-                throw new Error("LZMA2: truncated input");
-            }
+            need(packed);
             dec.initRange(data, pos, pos + packed);
             dec.decode(out.pos + unpacked, false);
+            dec.finishRange(true);
             pos += packed;
         }
     }
 
     return {
-        LzmaDecoder: LzmaDecoder,
         decodeLzmaAlone: decodeLzmaAlone,
         decodeLzma2: decodeLzma2
     };
