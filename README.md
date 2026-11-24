@@ -107,4 +107,12 @@ cd _test
 ./run-javascript
 ```
 
+Or, with Docker or Podman, after `./compile-ksy`:
+
+```sh
+cd _test/docker
+./build-images
+./dockerci python/3.12   # or ruby/3.2, javascript/nodejs22
+```
+
 `generate-data` documents how the files in `_test/compressed` were made.
