@@ -15,14 +15,25 @@
         root.BlockCipher = factory(root.CryptoJS);
     }
 }(typeof self !== 'undefined' ? self : this, function (CryptoJS) {
+    var TRIPLE_DES = { cipher: "TripleDES", blockSize: 8, keySizes: [16, 24] };
     var ALGORITHMS = {
         "des": { cipher: "DES", blockSize: 8, keySizes: [8] },
-        "3des": { cipher: "TripleDES", blockSize: 8, keySizes: [16, 24] },
-        "des3": { cipher: "TripleDES", blockSize: 8, keySizes: [16, 24] },
+        "3des": TRIPLE_DES,
+        "des3": TRIPLE_DES,
         "aes": { cipher: "AES", blockSize: 16, keySizes: [16, 24, 32] }
     };
     var MODES = { "ecb": "ECB", "cbc": "CBC" };
-    var PADDINGS = { "pkcs7": true, "none": true };
+    var PADDINGS = { "pkcs7": "pkcs7", "none": "none" };
+
+    // Case-insensitive lookup of a constructor argument in one of the tables above
+    function lookup(table, what, name) {
+        var key = String(name).toLowerCase();
+        if (!Object.prototype.hasOwnProperty.call(table, key)) {
+            throw new Error("BlockCipher: unknown " + what + " '" + name + "', expected one of: " +
+                Object.keys(table).join(", "));
+        }
+        return table[key];
+    }
 
     function toBytes(value, what) {
         if (typeof value === 'string') {
@@ -41,10 +52,7 @@
 
     // Uint8Array (any byteOffset) -> CryptoJS WordArray (big-endian 32-bit words)
     function toWordArray(bytes) {
-        var words = new Array((bytes.length + 3) >>> 2);
-        for (var w = 0; w < words.length; w++) {
-            words[w] = 0;
-        }
+        var words = new Array((bytes.length + 3) >>> 2).fill(0);
         for (var i = 0; i < bytes.length; i++) {
             words[i >>> 2] |= bytes[i] << (24 - (i & 3) * 8);
         }
@@ -60,18 +68,9 @@
     }
 
     function BlockCipher(algorithm, mode, key, iv, padding) {
-        var algo = ALGORITHMS[String(algorithm).toLowerCase()];
-        if (!algo) {
-            throw new Error("BlockCipher: unknown algorithm '" + algorithm + "', expected des, 3des or aes");
-        }
-        var modeName = MODES[String(mode).toLowerCase()];
-        if (!modeName) {
-            throw new Error("BlockCipher: unknown mode '" + mode + "', expected ecb or cbc");
-        }
-        this.padding = (padding === undefined || padding === null) ? "pkcs7" : String(padding).toLowerCase();
-        if (!PADDINGS[this.padding]) {
-            throw new Error("BlockCipher: unknown padding '" + padding + "', expected pkcs7 or none");
-        }
+        var algo = lookup(ALGORITHMS, "algorithm", algorithm);
+        var modeName = lookup(MODES, "mode", mode);
+        this.padding = lookup(PADDINGS, "padding", padding == null ? "pkcs7" : padding);
         var keyBytes = toBytes(key, "key");
         if (algo.keySizes.indexOf(keyBytes.length) < 0) {
             throw new Error("BlockCipher: invalid key length " + keyBytes.length + " for " + algorithm +
@@ -82,7 +81,7 @@
         this.key = toWordArray(keyBytes);
         this.cfg = { mode: CryptoJS.mode[modeName], padding: CryptoJS.pad.NoPadding };
         if (modeName === "CBC") {
-            if (iv === undefined || iv === null) {
+            if (iv == null) {
                 throw new Error("BlockCipher: cbc mode requires an iv");
             }
             var ivBytes = toBytes(iv, "iv");

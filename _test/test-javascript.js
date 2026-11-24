@@ -31,12 +31,9 @@ var PROCESSES = [
     { parser: 'TestAesEcb', process: 'BlockCipher', args: ['aes', 'ecb', aesEcbKey()], ext: 'aes_ecb', encode: 'exact' },
 ];
 
+// bytes 0x00..0x1f
 function aesEcbKey() {
-    var key = new Uint8Array(32);
-    for (var i = 0; i < key.length; i++) {
-        key[i] = i;
-    }
-    return key;
+    return new Uint8Array(32).map(function(_, i) { return i; });
 }
 
 function readFile(path) {
@@ -75,11 +72,8 @@ function assertBytesEqual(actual, expected) {
 }
 
 function newProcess(p) {
-    var Mod = require('kaitai-compress/' + p.process);
-    var Cls = Mod[p.process];
-    var obj = Object.create(Cls.prototype);
-    Cls.apply(obj, p.args);
-    return obj;
+    var Cls = require('kaitai-compress/' + p.process)[p.process];
+    return Reflect.construct(Cls, p.args);
 }
 
 describe('kaitai_compress', function() {
@@ -211,9 +205,34 @@ describe('kaitai_compress', function() {
         it('LzmaXz: CRC mismatch and bad magic', function() {
             var data = compressed('ascii_text', 'xz');
             assert.throws(function() { new LzmaXz().decode(corrupt(data, 0)); }, /magic/);
-            // the block check (CRC64) is right before the index and the 12-byte footer
-            var checkPos = data.length - 12 - 12 - 8;
-            assert.throws(function() { new LzmaXz().decode(corrupt(data, checkPos)); }, /CRC64 mismatch/);
+            // the file ends with the block check (CRC64), the 8-byte index
+            // (indicator, record count, 2 sizes, CRC32) and the 12-byte footer
+            var indexPos = data.length - 12 - 8;
+            assert.throws(function() { new LzmaXz().decode(corrupt(data, indexPos - 8)); }, /CRC64 mismatch/);
+            assert.throws(function() { new LzmaXz().decode(corrupt(data, indexPos + 2)); }, /index record/);
+        });
+
+        it('LzmaXz: concatenated streams with stream padding', function() {
+            var a = compressed('90_a', 'xz');
+            var b = compressed('ascii_text', 'xz');
+            var both = concat(concat(a, new Uint8Array(8)), b);
+            assertBytesEqual(new LzmaXz().decode(both), concat(uncompressed('90_a'), uncompressed('ascii_text')));
+            assert.throws(function() { new LzmaXz().decode(concat(a, new Uint8Array(3))); }, /padding/);
+        });
+
+        it('LZMA2: junk after the LZMA data of a chunk', function() {
+            // a single LZMA chunk (control byte, 2 bytes unpacked size - 1,
+            // 2 bytes packed size - 1, properties, LZMA data) and the end byte
+            var raw = compressed('90_a', 'lzma_raw');
+            var junk = concat(concat(raw.subarray(0, raw.length - 1), new Uint8Array([0x00])), raw.subarray(raw.length - 1));
+            junk[4]++;
+            assert.throws(function() { new LzmaRaw().decode(junk); }, /corrupted/);
+        });
+
+        it('Gzip: concatenated members', function() {
+            var Gzip = require('kaitai-compress/Gzip').Gzip;
+            var both = concat(compressed('90_a', 'gz'), compressed('ascii_text', 'gz'));
+            assertBytesEqual(new Gzip().decode(both), concat(uncompressed('90_a'), uncompressed('ascii_text')));
         });
 
         it('LZMA: truncated input', function() {
