@@ -1,16 +1,13 @@
 # PyPI: python-snappy (raw block codec only; framing is implemented here)
-import struct
-
 import snappy
 
 _STREAM_ID = b"\xff\x06\x00\x00sNaPpY"
-_MAX_CHUNK = 65536
+_MAX_CHUNK = 65536  # uncompressed bytes per chunk
 
 
 def _crc32c_table():
     table = []
-    for i in range(256):
-        crc = i
+    for crc in range(256):
         for _ in range(8):
             crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
         table.append(crc)
@@ -22,11 +19,14 @@ _TABLE = _crc32c_table()
 
 def _masked_crc32c(data):
     crc = 0xFFFFFFFF
-    table = _TABLE
     for b in data:
-        crc = table[(crc ^ b) & 0xFF] ^ (crc >> 8)
+        crc = _TABLE[(crc ^ b) & 0xFF] ^ (crc >> 8)
     crc ^= 0xFFFFFFFF
     return (((crc >> 15) | (crc << 17)) + 0xA282EAD8) & 0xFFFFFFFF
+
+
+def _chunk(kind, body):
+    return bytes([kind]) + len(body).to_bytes(3, "little") + body
 
 
 class SnappyFramed:
@@ -40,25 +40,22 @@ class SnappyFramed:
         out = []
         pos = 0
         while pos < len(data):
-            if pos + 4 > len(data):
-                raise ValueError("snappy_framed: truncated chunk header")
             kind = data[pos]
-            length = int.from_bytes(data[pos + 1:pos + 4], "little")
-            body = data[pos + 4:pos + 4 + length]
-            if len(body) != length:
+            end = pos + 4 + int.from_bytes(data[pos + 1:pos + 4], "little")
+            if end > len(data) or pos + 4 > len(data):
                 raise ValueError("snappy_framed: truncated chunk")
-            pos += 4 + length
+            body = data[pos + 4:end]
+            pos = end
             if kind == 0xFF:
-                if data[pos - 10:pos] != _STREAM_ID:
+                if body != _STREAM_ID[4:]:
                     raise ValueError("snappy_framed: bad stream identifier")
             elif kind in (0x00, 0x01):
-                if length < 4:
+                if len(body) < 4:
                     raise ValueError("snappy_framed: chunk too short")
-                (crc,) = struct.unpack("<I", body[:4])
-                chunk = snappy.decompress(body[4:]) if kind == 0x00 else body[4:]
-                if _masked_crc32c(chunk) != crc:
+                payload = snappy.decompress(body[4:]) if kind == 0x00 else body[4:]
+                if _masked_crc32c(payload) != int.from_bytes(body[:4], "little"):
                     raise ValueError("snappy_framed: CRC mismatch")
-                out.append(chunk)
+                out.append(payload)
             elif kind < 0x80:
                 raise ValueError("snappy_framed: reserved unskippable chunk 0x%02x" % kind)
             # 0x80..0xfe: skippable or padding
@@ -67,12 +64,11 @@ class SnappyFramed:
     def encode(self, data):
         out = [_STREAM_ID]
         for i in range(0, len(data), _MAX_CHUNK):
-            chunk = data[i:i + _MAX_CHUNK]
-            crc = struct.pack("<I", _masked_crc32c(chunk))
-            compressed = snappy.compress(chunk)
-            if len(compressed) < len(chunk):
-                kind, body = 0x00, compressed
+            payload = data[i:i + _MAX_CHUNK]
+            crc = _masked_crc32c(payload).to_bytes(4, "little")
+            compressed = snappy.compress(payload)
+            if len(compressed) < len(payload):
+                out.append(_chunk(0x00, crc + compressed))
             else:
-                kind, body = 0x01, chunk
-            out.append(struct.pack("<I", kind | (len(body) + 4) << 8) + crc + body)
+                out.append(_chunk(0x01, crc + payload))
         return b"".join(out)

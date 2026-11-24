@@ -115,8 +115,8 @@ class _Decoder:
                 length = _BASE[symbol] + self.bits(_EXTRA[symbol])
                 if length == 519:  # end code
                     return bytes(out)
-                symbol = 2 if length == 2 else dict_bits
-                dist = (self.decode(_DISTCODE) << symbol) + self.bits(symbol) + 1
+                low_bits = 2 if length == 2 else dict_bits
+                dist = (self.decode(_DISTCODE) << low_bits) + self.bits(low_bits) + 1
                 if dist > len(out):
                     raise ValueError("implode: distance too far back")
                 start = len(out) - dist
@@ -131,5 +131,10 @@ class _Decoder:
 
 
 class Implode:
+    """PKWare DCL implode. Decode only: there is no compressor here."""
+
     def decode(self, data):
         return _Decoder(data).run()
+
+    def encode(self, data):
+        raise NotImplementedError("implode: compression is not supported, only decompression")
