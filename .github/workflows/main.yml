@@ -78,3 +78,25 @@ jobs:
         run: npm install
       - working-directory: _test
         run: ./run-javascript
+
+  docker:
+    needs: compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiled
+          path: _test/compiled
+      - name: Build all Docker images
+        working-directory: _test/docker
+        run: DOCKER_ENGINE=docker ./build-images
+      - name: Test on python/3.12
+        working-directory: _test/docker
+        run: DOCKER_ENGINE=docker ./dockerci python/3.12
+      - name: Test on ruby/3.2
+        working-directory: _test/docker
+        run: DOCKER_ENGINE=docker ./dockerci ruby/3.2
+      - name: Test on javascript/nodejs22
+        working-directory: _test/docker
+        run: DOCKER_ENGINE=docker ./dockerci javascript/nodejs22
