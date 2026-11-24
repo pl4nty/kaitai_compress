@@ -61,6 +61,7 @@ Add [ruby/lib/](https://github.com/kaitai-io/kaitai_compress/tree/master/ruby/li
 | [gzip](https://en.wikipedia.org/wiki/Gzip) | `gzip` | None | [RFC 1952](https://datatracker.ietf.org/doc/html/rfc1952), concatenated members on decode | P R J | gz |
 | PKWare DCL implode | `implode` | None | As decoded by Mark Adler's blast.c (not ZIP method 6) | - | ascii.implode, binary.implode |
 | [LZ4](https://en.wikipedia.org/wiki/LZ4_(compression_algorithm)) | `lz4` | None | [LZ4 frame format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md) | P R J | lz4 |
+| [LZ4](https://en.wikipedia.org/wiki/LZ4_(compression_algorithm)) | `lz4_block` | `uncompressed_size` | Raw [LZ4 block format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md), no frame or size prefix. Decodes at most `uncompressed_size` bytes and ignores trailing bytes after that (e.g. CSO/ZSO alignment padding). Pure-code decoder in all languages; Ruby/JS encode emits literal-only blocks | P R J | lz4_block (u4le size prefix + block) |
 | [LZMA](https://en.wikipedia.org/wiki/Lempel%E2%80%93Ziv%E2%80%93Markov_chain_algorithm) | `lzma_raw` | None | Raw LZMA2 stream (`xz --format=raw`) | P R | lzma_raw |
 | [LZMA](https://en.wikipedia.org/wiki/Lempel%E2%80%93Ziv%E2%80%93Markov_chain_algorithm) | `lzma_lzma` | None | Legacy .lzma file format (AKA alone) | P R J | lzma |
 | [LZMA](https://en.wikipedia.org/wiki/Lempel%E2%80%93Ziv%E2%80%93Markov_chain_algorithm) | `lzma_xz` | None | .xz file format | P R | xz |
@@ -93,7 +94,7 @@ seq:
 
 ## Dependencies
 
-* Python: stdlib for zlib/deflate/gzip/bz2/lzma; `pip install ./python[all]` or pick extras (`brotli`, `lz4`, `zstd`, `snappy`, `crypto`, `isal`). Libraries are imported only when a process is used. With `isal` installed, zlib, deflate and gzip use it.
+* Python: stdlib for zlib/deflate/gzip/bz2/lzma; `pip install ./python[all]` or pick extras (`brotli`, `lz4` (`lz4_block` needs it only to encode), `zstd`, `snappy`, `crypto`, `isal`). Libraries are imported only when a process is used. With `isal` installed, zlib, deflate and gzip use it.
 * Ruby: `require 'kaitai/compress'` autoloads every process. Gems are listed in [_test/Gemfile](_test/Gemfile). DES needs OpenSSL's legacy provider, which is loaded on demand.
 * JavaScript: pure-JS, synchronous libraries (works in browsers); see [javascript/package.json](javascript/package.json).
 

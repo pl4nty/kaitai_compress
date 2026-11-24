@@ -13,6 +13,8 @@ var DATA_NAMES = ['90_a', '25k_uuids', 'ascii_text'];
 var PROCESSES = [
     { parser: 'TestBrotli', process: 'Brotli', args: [], ext: 'br', encode: 'none' },
     { parser: 'TestLz4', process: 'Lz4', args: [], ext: 'lz4', encode: 'roundtrip' },
+    // sized: the only arg is the uncompressed size; the test file starts with it as u4le
+    { parser: 'TestLz4Block', process: 'Lz4Block', args: [], sized: true, ext: 'lz4_block', encode: 'roundtrip' },
     { parser: 'TestLzmaRaw', process: 'LzmaRaw', args: [], ext: 'lzma_raw', encode: 'none' },
     { parser: 'TestLzmaLzma', process: 'LzmaLzma', args: [], ext: 'lzma', encode: 'roundtrip' },
     { parser: 'TestLzmaXz', process: 'LzmaXz', args: [], ext: 'xz', encode: 'none' },
@@ -71,9 +73,9 @@ function assertBytesEqual(actual, expected) {
         Buffer.from(expected.buffer, expected.byteOffset, expected.byteLength).toString('hex'));
 }
 
-function newProcess(p) {
+function newProcess(p, size) {
     var Cls = require('kaitai-compress/' + p.process)[p.process];
-    return Reflect.construct(Cls, p.args);
+    return Reflect.construct(Cls, p.sized ? [size] : p.args);
 }
 
 describe('kaitai_compress', function() {
@@ -97,8 +99,9 @@ describe('kaitai_compress', function() {
                 });
 
                 it(dataName + ': decodes a subarray view', function() {
-                    var proc = newProcess(p);
-                    var out = proc.decode(asSubarray(compressed(dataName, p.ext)));
+                    var proc = newProcess(p, expected.length);
+                    var input = compressed(dataName, p.ext);
+                    var out = proc.decode(asSubarray(p.sized ? input.subarray(4) : input));
                     if (p.process === 'Crc32Trailer') {
                         out = out.subarray(0, out.length - 4);
                     }
@@ -107,7 +110,7 @@ describe('kaitai_compress', function() {
 
                 if (p.encode === 'roundtrip') {
                     it(dataName + ': decode(encode(x)) == x', function() {
-                        var proc = newProcess(p);
+                        var proc = newProcess(p, expected.length);
                         var enc = proc.encode(asSubarray(expected));
                         assertBytesEqual(proc.decode(enc), expected);
                     });
@@ -136,7 +139,7 @@ describe('kaitai_compress', function() {
         PROCESSES.forEach(function(p) {
             if (p.encode === 'roundtrip' || p.encode === 'exact') {
                 it(p.process + ' ' + p.args.slice(0, 2).join(' '), function() {
-                    var proc = newProcess(p);
+                    var proc = newProcess(p, bytes.length);
                     var dec = proc.decode(proc.encode(bytes));
                     if (p.process === 'Crc32Trailer') {
                         assertBytesEqual(dec.subarray(0, dec.length - 4), bytes.subarray(0, bytes.length - 4));
@@ -227,6 +230,26 @@ describe('kaitai_compress', function() {
             var junk = concat(concat(raw.subarray(0, raw.length - 1), new Uint8Array([0x00])), raw.subarray(raw.length - 1));
             junk[4]++;
             assert.throws(function() { new LzmaRaw().decode(junk); }, /corrupted/);
+        });
+
+        it('Lz4Block: padding, overlapping matches, short blocks, bad offsets', function() {
+            var Lz4Block = require('kaitai-compress/Lz4Block').Lz4Block;
+            DATA_NAMES.forEach(function(dataName) {
+                var expected = uncompressed(dataName);
+                var block = compressed(dataName, 'lz4_block').subarray(4);
+                assertBytesEqual(new Lz4Block(expected.length).decode(concat(block, new Uint8Array(2048))), expected);
+                assert.throws(function() { new Lz4Block(expected.length).decode(block.subarray(0, block.length - 1)); }, /truncated/);
+            });
+            var overlap = new Uint8Array([0x26, 0x61, 0x62, 0x02, 0x00, 0x10, 0x7a]);
+            assert.strictEqual(Buffer.from(new Lz4Block(13).decode(overlap)).toString(), 'abababababab' + 'z');
+            assert.throws(function() { new Lz4Block(5).decode(overlap); }, /more than 5/);
+            assertBytesEqual(new Lz4Block(100).decode(new Uint8Array([0x30, 0x61, 0x62, 0x63])), new Uint8Array([0x61, 0x62, 0x63]));
+            assert.throws(function() { new Lz4Block(100).decode(new Uint8Array([0x10, 0x61, 0x05, 0x00])); }, /offset/);
+            assert.throws(function() { new Lz4Block(100).decode(new Uint8Array([0x10, 0x61, 0x00, 0x00])); }, /offset/);
+            [0, 14, 15, 269, 270, 1000].forEach(function(n) {
+                var data = new Uint8Array(n).map(function(_, i) { return (i * 37) & 0xff; });
+                assertBytesEqual(new Lz4Block(n).decode(new Lz4Block(n).encode(data)), data);
+            });
         });
 
         it('Gzip: concatenated members', function() {
