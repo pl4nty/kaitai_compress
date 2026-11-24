@@ -1,20 +1,25 @@
+// npm: lz4js
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
-        define(['kaitai-struct/KaitaiStream', 'lz4'], factory);
+        define(['lz4js'], factory);
     } else if (typeof module === 'object' && module.exports) {
-        module.exports = factory(require('kaitai-struct/KaitaiStream'), require('lz4'));
+        module.exports = factory(require('lz4js'));
     } else {
-        root.Lz4 = factory(root.KaitaiStream, LZ4);
+        root.Lz4 = factory(root.lz4);
     }
-}(this, function (KaitaiStream, RealLZ4) {
-    var Lz4 = (function() {
-        function Lz4() {
-        }
-        Lz4.prototype.decode = function(src) {
-            return RealLZ4.decode(src);
-        }
+}(typeof self !== 'undefined' ? self : this, function (lz4js) {
+    function Lz4() {
+    }
 
-        return Lz4;
-    })();
+    Lz4.prototype.decode = function(data) {
+        return new Uint8Array(lz4js.decompress(data));
+    };
+
+    Lz4.prototype.encode = function(data) {
+        return new Uint8Array(lz4js.compress(data));
+    };
+
+    // ksc >= 0.11 generated code does `new Lz4_.Lz4()`, older code does `new Lz4()`
+    Lz4.Lz4 = Lz4;
     return Lz4;
 }));

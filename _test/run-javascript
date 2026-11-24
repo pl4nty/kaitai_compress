@@ -10,4 +10,4 @@ if [ "$OS" = "Windows_NT" ]; then
 fi
 
 NODE_PATH="compiled/javascript${DIVIDER}../javascript${DIVIDER}$JAVASCRIPT_MODULES_DIR" \
-	"$JAVASCRIPT_MODULES_DIR/mocha/bin/mocha" test-javascript.js
+	node "$JAVASCRIPT_MODULES_DIR/mocha/bin/mocha.js" test-javascript.js
