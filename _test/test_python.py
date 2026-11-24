@@ -28,6 +28,8 @@ CASES = {
     "test_deflate": ("deflate", kc.Deflate()),
     "test_gzip": ("gz", kc.Gzip()),
     "test_lz4": ("lz4", kc.Lz4()),
+    # the process argument is the body size; the 4-byte size prefix is added below
+    "test_lz4_block": ("lz4_block", None),
     "test_lzma_lzma": ("lzma", kc.LzmaLzma()),
     "test_lzma_raw": ("lzma_raw", kc.LzmaRaw()),
     "test_lzma_xz": ("xz", kc.LzmaXz()),
@@ -93,6 +95,18 @@ class TestProcesses(unittest.TestCase):
                 self.assertEqual(parse(cls, written).body, expected)
                 if isinstance(process, kc.BlockCipher):  # deterministic, unlike compressors
                     self.assertEqual(written, compressed)
+
+    def test_lz4_block(self):
+        cls = compiled_class("test_lz4_block")
+        for name in NAMES:
+            with self.subTest(file=name):
+                expected = read("uncompressed", name + ".dat")
+                obj = cls()
+                obj.len_uncompressed = len(expected)
+                obj.body = expected
+                written = write(obj, 4 + len(kc.Lz4Block(len(expected)).encode(expected)))
+                self.assertEqual(parse(cls, written).body, expected)
+                self.assertEqual(written[:4], len(expected).to_bytes(4, "little"))
 
     def test_crc32_trailer(self):
         cls = compiled_class("test_crc32_trailer")
@@ -183,6 +197,57 @@ class TestErrors(unittest.TestCase):
         self.assertEqual(kc.Zstd().decode(frame + frame), data + data)
         with self.assertRaises(ValueError):
             kc.Zstd().decode(frame[:-3])
+
+    def test_lz4_block_padding_and_errors(self):
+        for name in NAMES:
+            with self.subTest(file=name):
+                expected = read("uncompressed", name + ".dat")
+                block = read("compressed", name + ".lz4_block")[4:]
+                p = kc.Lz4Block(len(expected))
+                # trailing padding after the last sequence is ignored
+                self.assertEqual(p.decode(block + b"\x00" * 2048), expected)
+                self.assertEqual(p.decode(block + b"\xff" * 3), expected)
+                # a smaller size stops early, mid-literals, or fails mid-match
+                if len(expected) > 20:
+                    try:
+                        self.assertEqual(kc.Lz4Block(20).decode(block), expected[:20])
+                    except ValueError as e:
+                        self.assertIn("more than 20", str(e))
+                with self.assertRaises(ValueError):
+                    p.decode(block[:-1])  # cuts the last literal
+        # literals then a match that refers before the start of the output
+        with self.assertRaises(ValueError):
+            kc.Lz4Block(100).decode(b"\x10a\x05\x00")
+        with self.assertRaises(ValueError):
+            kc.Lz4Block(100).decode(b"\x10a\x00\x00")
+        # overlapping match: "ab" then copy 10 bytes at offset 2, then 1 literal
+        self.assertEqual(kc.Lz4Block(13).decode(b"\x26ab\x02\x00\x10z"), b"ab" * 6 + b"z")
+        # a block that ends early decodes to fewer bytes
+        self.assertEqual(kc.Lz4Block(100).decode(b"\x30abc"), b"abc")
+        self.assertEqual(kc.Lz4Block(0).decode(b""), b"")
+        p = kc.Lz4Block(0)
+        self.assertEqual(p.decode(p.encode(b"")), b"")
+        # output beyond the size (literals or a match) is an error
+        for size in (2, 5):
+            with self.assertRaisesRegex(ValueError, "more than %d" % size):
+                kc.Lz4Block(size).decode(b"\x26ab\x02\x00\x10z" if size == 5 else b"\x30abc")
+        # a short block followed by padding: the padding is read as sequences
+        with self.assertRaises(ValueError):
+            kc.Lz4Block(100).decode(b"\x30abc" + b"\x00" * 16)
+        for bad in (-1, 1.5, "10", None, True):
+            with self.subTest(size=bad):
+                with self.assertRaises(ValueError):
+                    kc.Lz4Block(bad)
+
+    def test_lz4_block_literal_encoder(self):
+        from kaitai.compress.lz4_block import _encode_literals
+        import lz4.block
+        for n in (0, 1, 14, 15, 16, 269, 270, 271, 1000, 70000):
+            with self.subTest(n=n):
+                data = bytes((i * 37) & 0xFF for i in range(n))
+                enc = _encode_literals(data)
+                self.assertEqual(kc.Lz4Block(n).decode(enc), data)
+                self.assertEqual(lz4.block.decompress(enc, uncompressed_size=n), data)
 
     def test_gzip_concatenated_members(self):
         g = kc.Gzip()

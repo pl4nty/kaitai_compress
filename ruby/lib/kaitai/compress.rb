@@ -16,6 +16,7 @@ module Kaitai
       Gzip: 'gzip',
       Implode: 'implode',
       Lz4: 'lz4',
+      Lz4Block: 'lz4_block',
       LzmaLzma: 'lzma_lzma',
       LzmaRaw: 'lzma_raw',
       LzmaXz: 'lzma_xz',

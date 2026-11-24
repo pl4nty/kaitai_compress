@@ -39,6 +39,9 @@ for I in uncompressed/*.dat; do
 	echo "$BASE.ascii.implode"  # no official extension
 	python3 -c "import sys, pkimplode; from pathlib import Path; i = Path(sys.argv[1]).open('rb'); o = Path(sys.argv[2]).open('wb'); pkimplode.compressStreamToStream(i, o, compressionType=pkimplode.CompressionType.ascii, dictionarySize=4096); i.close(); o.close();" $I compressed/$BASE.ascii.implode
 
+	echo "$BASE.lz4_block"  # no official extension; u4le uncompressed size + raw LZ4 block
+	python3 -c "import sys, lz4.block; from pathlib import Path; i = Path(sys.argv[1]); o = Path(sys.argv[2]); o.write_bytes(lz4.block.compress(i.read_bytes(), mode='high_compression', compression=12, store_size=True));" $I compressed/$BASE.lz4_block
+
 	echo "$BASE.deflate $BASE.gz $BASE.bz2"
 	python3 -c "import sys, zlib, gzip, bz2; d = open(sys.argv[1], 'rb').read(); b = sys.argv[2]; c = zlib.compressobj(9, zlib.DEFLATED, -15); open(b + '.deflate', 'wb').write(c.compress(d) + c.flush()); open(b + '.gz', 'wb').write(gzip.compress(d, 9, mtime=0)); open(b + '.bz2', 'wb').write(bz2.compress(d, 9))" $I compressed/$BASE
 
