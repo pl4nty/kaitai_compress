@@ -1,38 +1,216 @@
 #!/usr/bin/env ruby
 
-require 'rspec'
+require 'rspec/autorun'
 
-$LOAD_PATH << 'compiled/ruby'
-$LOAD_PATH << '../ruby/lib'
+$LOAD_PATH << File.join(__dir__, 'compiled/ruby')
+$LOAD_PATH << File.join(__dir__, '../ruby/lib')
 
-ALGORITHMS = [
-  {:alg_name => 'brotli', :ext => 'br', :class_name => 'TestBrotli'},
-  {:alg_name => 'lz4', :ext => 'lz4', :class_name => 'TestLz4'},
-  {:alg_name => 'lzma_lzma', :ext => 'lzma', :class_name => 'TestLzmaLzma'},
-  {:alg_name => 'lzma_xz', :ext => 'xz', :class_name => 'TestLzmaXz'},
-  {:alg_name => 'zlib', :ext => 'zlib', :class_name => 'TestZlib'},
-  {:alg_name => 'zstd', :ext => 'zst', :class_name => 'TestZstd'},
+# Only the umbrella file: ksc does not emit requires for processes, so this
+# also proves that every class is reachable through autoload.
+require 'kaitai/compress'
+
+Dir.chdir(__dir__)
+
+DES_CBC = ['des', 'cbc', 'S3crtMsG', 'S3crtMsG']
+AES_CBC = ['aes', 'cbc', '0123456789abcdef', 'fedcba9876543210', 'pkcs7']
+AES_ECB = ['aes', 'ecb', (0..0x1f).to_a.pack('C*')]
+
+# class: process class name; tests: [ksy class, compressed file ext];
+# args: constructor args; exact: encode(uncompressed) must equal the test file
+PROCESSES = [
+  {class: 'Brotli', tests: [['TestBrotli', 'br']]},
+  {class: 'Lz4', tests: [['TestLz4', 'lz4']]},
+  {class: 'LzmaRaw', tests: [['TestLzmaRaw', 'lzma_raw']]},
+  {class: 'LzmaLzma', tests: [['TestLzmaLzma', 'lzma']]},
+  {class: 'LzmaXz', tests: [['TestLzmaXz', 'xz']]},
+  {class: 'Zlib', tests: [['TestZlib', 'zlib']]},
+  {class: 'Deflate', tests: [['TestDeflate', 'deflate']]},
+  {class: 'Gzip', tests: [['TestGzip', 'gz']]},
+  {class: 'Zstd', tests: [['TestZstd', 'zst']]},
+  {class: 'Bz2', tests: [['TestBz2', 'bz2']]},
+  {class: 'Snappy', tests: [['TestSnappy', 'raw.sz']]},
+  {class: 'SnappyFramed', tests: [['TestSnappyFramed', 'framing2.sz']]},
+  {class: 'Implode', tests: [['TestImplodeAscii', 'ascii.implode'], ['TestImplodeBinary', 'binary.implode']]},
+  {class: 'Crc32Trailer', args: ['B1gS'], exact: true, tests: [['TestCrc32Trailer', 'crc32_trailer']]},
+  {class: 'BlockCipher', args: DES_CBC, exact: true, tests: [['TestDesCbc', 'des_cbc']]},
+  {class: 'BlockCipher', args: AES_CBC, exact: true, tests: [['TestAesCbc', 'aes_cbc']]},
+  {class: 'BlockCipher', args: AES_ECB, exact: true, tests: [['TestAesEcb', 'aes_ecb']]},
 ]
 
-ALGORITHMS.each { |alg|
-  name = alg[:alg_name]
-
-  require "kaitai/compress/#{name}"
-  require "test_#{name}"
-  alg[:class] = Kernel::const_get(alg[:class_name])
+UNCOMPRESSED = Dir.glob('uncompressed/*.dat').sort.to_h { |fn|
+  [File.basename(fn, '.dat'), File.binread(fn)]
 }
 
-Dir.glob('uncompressed/*.dat').each { |uncompressed_fn|
-  name = File.basename(uncompressed_fn).gsub(/.dat$/, '')
+# Returns [class, nil] or [nil, reason] when the process's gem is missing.
+def load_process(name)
+  [Kaitai::Compress.const_get(name), nil]
+rescue LoadError => e
+  [nil, "#{name}: library not installed (#{e.message})"]
+end
 
-  uncompressed_data = File.binread(uncompressed_fn)
+def snake(name)
+  name.gsub(/(?<!^)([A-Z])/, '_\1').downcase
+end
 
-  ALGORITHMS.each { |alg|
-    context alg[:ext] do
-      it "algorithm parses #{name}" do
-        obj = alg[:class].from_file("compressed/#{name}.#{alg[:ext]}")
-        expect(obj.body).to eq uncompressed_data
-      end
+PROCESSES.each { |pr|
+  cls, missing = load_process(pr[:class])
+  args = pr[:args] || []
+
+  pr[:tests].each { |ksy_class, ext|
+    describe "#{ksy_class} (#{ext})" do
+      before { skip missing } if missing
+
+      UNCOMPRESSED.each { |name, data|
+        it "parses #{name}" do
+          require snake(ksy_class)
+          obj = Kernel.const_get(ksy_class).from_file("compressed/#{name}.#{ext}")
+          expect(obj.body).to eq data
+        end
+
+        it "decodes #{name} directly" do
+          out = cls.new(*args).decode(File.binread("compressed/#{name}.#{ext}"))
+          out = out.byteslice(0, out.bytesize - 4) if pr[:class] == 'Crc32Trailer'
+          expect(out).to eq data
+        end
+
+        if pr[:exact]
+          input = pr[:class] == 'Crc32Trailer' ? data + "\0\0\0\0".b : data
+          it "encodes #{name} to the exact test file" do
+            expect(cls.new(*args).encode(input)).to eq File.binread("compressed/#{name}.#{ext}")
+          end
+        end
+      }
     end
   }
+
+  next if pr[:class] == 'Implode' # decode only
+  describe "#{pr[:class]}#{args.empty? ? '' : " #{args.first(2).inspect}"} encode" do
+    before { skip missing } if missing
+
+    (UNCOMPRESSED.to_a + [['empty', ''.b]]).each { |name, data|
+      it "round-trips #{name}" do
+        obj = cls.new(*args)
+        skip "#{pr[:class]} has no encode" unless obj.respond_to?(:encode)
+        data += "\0\0\0\0".b if pr[:class] == 'Crc32Trailer'
+        decoded = obj.decode(obj.encode(data))
+        expect(decoded).to eq(pr[:class] == 'Crc32Trailer' ? obj.encode(data) : data)
+      end
+    }
+  end
 }
+
+describe 'Implode' do
+  it 'is decode only' do
+    expect(Kaitai::Compress::Implode.new).to respond_to(:decode)
+  end
+end
+
+describe 'error handling' do
+  E = Kaitai::Compress::Error
+  def file(n) = File.binread("compressed/#{n}")
+
+  context 'Crc32Trailer' do
+    let(:crc) { Kaitai::Compress::Crc32Trailer.new('B1gS') }
+
+    it 'raises on CRC mismatch' do
+      data = file('ascii_text.crc32_trailer')
+      data.setbyte(0, data.getbyte(0) ^ 1)
+      expect { crc.decode(data) }.to raise_error(E, /CRC mismatch/)
+    end
+
+    it 'raises on wrong salt' do
+      expect { Kaitai::Compress::Crc32Trailer.new.decode(file('90_a.crc32_trailer')) }.to raise_error(E, /CRC mismatch/)
+    end
+
+    it 'raises on input shorter than 4 bytes' do
+      expect { crc.decode("abc") }.to raise_error(E, /at least 4/)
+      expect { crc.encode("abc") }.to raise_error(E, /at least 4/)
+    end
+
+    it 'accepts a byte array salt' do
+      expect(Kaitai::Compress::Crc32Trailer.new([0x42, 0x31, 0x67, 0x53].pack('C*')).decode(file('90_a.crc32_trailer'))).to eq file('90_a.crc32_trailer')
+    end
+  end
+
+  context 'BlockCipher' do
+    BC = Kaitai::Compress::BlockCipher
+
+    it 'raises on unknown algorithm, mode or padding' do
+      expect { BC.new('rc4', 'ecb', 'k' * 16) }.to raise_error(ArgumentError, /unknown algorithm/)
+      expect { BC.new('aes', 'ctr', 'k' * 16) }.to raise_error(ArgumentError, /unknown mode/)
+      expect { BC.new('aes', 'ecb', 'k' * 16, nil, 'zeros') }.to raise_error(ArgumentError, /unknown padding/)
+    end
+
+    it 'raises on wrong key or iv length, or missing iv' do
+      expect { BC.new('aes', 'ecb', 'k' * 15) }.to raise_error(ArgumentError, /key must be/)
+      expect { BC.new('des', 'ecb', 'k' * 16) }.to raise_error(ArgumentError, /key must be/)
+      expect { BC.new('aes', 'cbc', 'k' * 16) }.to raise_error(ArgumentError, /requires an iv/)
+      expect { BC.new('aes', 'cbc', 'k' * 16, 'i' * 8) }.to raise_error(ArgumentError, /iv must be 16/)
+    end
+
+    it 'raises on bad padding' do
+      bc = BC.new(*AES_ECB)
+      raw = BC.new('aes', 'ecb', AES_ECB[2], nil, 'none')
+      expect { bc.decode(raw.encode("x" * 15 + "\x02")) }.to raise_error(E, /padding/)
+      expect { bc.decode(raw.encode("x" * 15 + "\x00")) }.to raise_error(E, /padding/)
+      expect { bc.decode(raw.encode("x" * 15 + "\x11")) }.to raise_error(E, /padding/)
+    end
+
+    it 'raises on empty input and non block-multiple length' do
+      bc = BC.new(*DES_CBC)
+      expect { bc.decode(''.b) }.to raise_error(E, /empty/)
+      expect { bc.decode('x' * 9) }.to raise_error(E, /multiple of block size/)
+      expect { BC.new('aes', 'ecb', 'k' * 16, nil, 'none').encode('x' * 3) }.to raise_error(E, /multiple of block size/)
+    end
+
+    it 'supports padding "none", 3DES (16/24-byte keys) and AES-192' do
+      [['des3', 'cbc', 'k' * 16, 'i' * 8], ['3des', 'ecb', 'k' * 24], ['aes', 'cbc', 'k' * 24, 'i' * 16, 'none'], ['des', 'ecb', 'k' * 8]].each { |a|
+        bc = BC.new(*a)
+        expect(bc.decode(bc.encode('0123456789abcdef'))).to eq '0123456789abcdef'
+      }
+    end
+
+    it 'is case-insensitive' do
+      expect(BC.new('AES', 'ECB', AES_ECB[2]).decode(file('90_a.aes_ecb'))).to eq UNCOMPRESSED['90_a']
+    end
+  end
+
+  context 'SnappyFramed' do
+    before { (reason = load_process('SnappyFramed')[1]) and skip reason }
+    let(:sf) { Kaitai::Compress::SnappyFramed.new }
+
+    it 'raises on CRC mismatch' do
+      data = sf.encode('hello hello hello hello'.b)
+      data.setbyte(10 + 4, data.getbyte(14) ^ 1)
+      expect { sf.decode(data) }.to raise_error(E, /CRC mismatch/)
+    end
+
+    it 'raises on missing stream identifier' do
+      expect { sf.decode('nope'.b) }.to raise_error(E, /stream identifier/)
+    end
+  end
+
+  context 'Gzip' do
+    it 'decodes concatenated members' do
+      g = Kaitai::Compress::Gzip.new
+      expect(g.decode(file('90_a.gz') + file('ascii_text.gz'))).to eq UNCOMPRESSED['90_a'] + UNCOMPRESSED['ascii_text']
+    end
+
+    it 'raises on truncated input' do
+      expect { Kaitai::Compress::Gzip.new.decode(file('ascii_text.gz')[0, 20]) }.to raise_error(E)
+    end
+  end
+
+  context 'Deflate' do
+    it 'raises on truncated input' do
+      expect { Kaitai::Compress::Deflate.new.decode(file('ascii_text.deflate')[0, 20]) }.to raise_error(E)
+    end
+  end
+
+  context 'LzmaRaw' do
+    before { (reason = load_process('LzmaRaw')[1]) and skip reason }
+    it 'raises on truncated input' do
+      expect { Kaitai::Compress::LzmaRaw.new.decode(file('ascii_text.lzma_raw')[0, 20]) }.to raise_error(E)
+    end
+  end
+end

@@ -1,0 +1,13 @@
+# Gems needed to run ./run-ruby (bundle install; then bundle exec ./run-ruby).
+source 'https://rubygems.org'
+
+gem 'kaitai-struct', '~> 0.11'
+gem 'rspec', '~> 3'
+
+# Compression libraries used by ruby/lib/kaitai/compress
+gem 'brotli'
+gem 'bzip2-ffi'
+gem 'extlz4'
+gem 'ruby-xz', '>= 1'
+gem 'snappy'
+gem 'zstd-ruby'

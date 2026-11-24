@@ -7,6 +7,10 @@ module Kaitai
       def decode(data)
         ::Zstd::decompress(data)
       end
+
+      def encode(data)
+        ::Zstd::compress(data)
+      end
     end
   end
 end
