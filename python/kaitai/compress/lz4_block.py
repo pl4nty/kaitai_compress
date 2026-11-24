@@ -1,14 +1,20 @@
 class Lz4Block:
     """Raw LZ4 block (no frame header, no size prefix).
 
-    Decodes at most `uncompressed_size` bytes: decoding stops as soon as that
-    many bytes have been produced, so trailing bytes after the last sequence
-    (e.g. alignment padding in CSO/ZSO disc images) are ignored. A match that
-    would run past `uncompressed_size` is an error. The decoder is pure Python; only encode needs
-    the `lz4` package (PyPI: lz4).
+    Decodes at most `uncompressed_size` bytes. Decoding stops as soon as that
+    many bytes have been produced, and only then are the remaining input bytes
+    (e.g. alignment padding in CSO/ZSO disc images) ignored. A block may also
+    end with the input after a complete sequence and decode to fewer bytes, but
+    a short block followed by padding is an error: the padding is read as more
+    sequences. Output beyond `uncompressed_size` is an error.
+
+    The decoder is pure Python. encode uses the `lz4` package (PyPI: lz4)
+    when it is installed, otherwise it writes a valid literal-only block.
     """
 
     def __init__(self, uncompressed_size):
+        if isinstance(uncompressed_size, bool) or not isinstance(uncompressed_size, int) or uncompressed_size < 0:
+            raise ValueError("lz4_block: uncompressed_size must be a non-negative integer, got %r" % (uncompressed_size,))
         self.uncompressed_size = uncompressed_size
 
     def decode(self, data):
@@ -66,6 +72,17 @@ class Lz4Block:
         return bytes(out)
 
     def encode(self, data):
-        # PyPI: lz4
-        import lz4.block
-        return lz4.block.compress(data, store_size=False)
+        try:
+            import lz4.block  # PyPI: lz4
+        except ImportError:
+            return _encode_literals(data)
+        return lz4.block.compress(bytes(data), store_size=False)
+
+
+def _encode_literals(data):
+    """A valid LZ4 block holding `data` as a single literal-only sequence."""
+    n = len(data)
+    if n < 15:
+        return bytes([n << 4]) + bytes(data)
+    rest = n - 15
+    return bytes([0xF0]) + b"\xff" * (rest // 255) + bytes([rest % 255]) + bytes(data)

@@ -9,15 +9,20 @@
     }
 }(typeof self !== 'undefined' ? self : this, function () {
     /**
-     * Decodes at most `uncompressedSize` bytes: decoding stops as soon as that
-     * many bytes have been produced, so trailing bytes after the last sequence
-     * (e.g. alignment padding in CSO/ZSO disc images) are ignored. A match that
-     * would run past `uncompressedSize` is an error.
+     * Decodes at most `uncompressedSize` bytes. Decoding stops as soon as that
+     * many bytes have been produced, and only then are the remaining input bytes
+     * (e.g. alignment padding in CSO/ZSO disc images) ignored. A block may also
+     * end with the input after a complete sequence and decode to fewer bytes, but
+     * a short block followed by padding is an error: the padding is read as more
+     * sequences. Output beyond `uncompressedSize` is an error.
      *
      * encode emits a valid block made of a single literal-only sequence (no
      * compression), so written files stay readable by any LZ4 decoder.
      */
     function Lz4Block(uncompressedSize) {
+        if (typeof uncompressedSize !== 'number' || !Number.isSafeInteger(uncompressedSize) || uncompressedSize < 0) {
+            throw new Error('lz4_block: uncompressedSize must be a non-negative integer, got ' + String(uncompressedSize));
+        }
         this.uncompressedSize = uncompressedSize;
     }
 
@@ -38,8 +43,17 @@
 
     Lz4Block.prototype.decode = function(data) {
         var size = this.uncompressedSize;
-        var out = new Uint8Array(size);
+        // The size comes from the file, so do not trust it for the allocation:
+        // start small and grow (doubling, capped at size) as output arrives.
+        var out = new Uint8Array(Math.min(size, Math.max(256, 4 * data.length)));
         var op = 0;
+        function reserve(n) {
+            if (op + n > out.length) {
+                var grown = new Uint8Array(Math.min(size, Math.max(op + n, 2 * out.length)));
+                grown.set(out.subarray(0, op));
+                out = grown;
+            }
+        }
         var state = { pos: 0 };
         var len = data.length;
         // A block whose last sequence ends with the input may decode to fewer
@@ -53,6 +67,7 @@
             if (op + litLen > size) {
                 throw new Error('lz4_block: block decodes to more than ' + size + ' bytes');
             }
+            reserve(litLen);
             out.set(data.subarray(state.pos, state.pos + litLen), op);
             op += litLen;
             state.pos += litLen;
@@ -71,12 +86,13 @@
             if (op + matchLen > size) {
                 throw new Error('lz4_block: block decodes to more than ' + size + ' bytes');
             }
+            reserve(matchLen);
             // byte by byte, so overlapping matches repeat the last `offset` bytes
             for (var i = 0; i < matchLen; i++, op++) {
                 out[op] = out[op - offset];
             }
         }
-        return op === size ? out : out.slice(0, op);
+        return op === out.length ? out : out.slice(0, op);
     };
 
     Lz4Block.prototype.encode = function(data) {

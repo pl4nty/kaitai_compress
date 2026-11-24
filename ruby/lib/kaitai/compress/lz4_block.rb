@@ -4,15 +4,20 @@ module Kaitai
   module Compress
     # Raw LZ4 block (no frame header, no size prefix), pure Ruby.
     #
-    # Decodes at most `uncompressed_size` bytes: decoding stops as soon as
-    # that many bytes have been produced, so trailing bytes after the last
-    # sequence (e.g. alignment padding in CSO/ZSO disc images) are ignored.
-    # A match that would run past `uncompressed_size` is an error.
+    # Decodes at most `uncompressed_size` bytes. Decoding stops as soon as that
+    # many bytes have been produced, and only then are the remaining input bytes
+    # (e.g. alignment padding in CSO/ZSO disc images) ignored. A block may also
+    # end with the input after a complete sequence and decode to fewer bytes, but
+    # a short block followed by padding is an error: the padding is read as more
+    # sequences. Output beyond `uncompressed_size` is an error.
     #
     # encode emits a valid block made of a single literal-only sequence (no
     # compression), so written files stay readable by any LZ4 decoder.
     class Lz4Block
       def initialize(uncompressed_size)
+        unless uncompressed_size.is_a?(Integer) && uncompressed_size >= 0
+          raise ArgumentError, "lz4_block: uncompressed_size must be a non-negative integer, got #{uncompressed_size.inspect}"
+        end
         @uncompressed_size = uncompressed_size
       end
 

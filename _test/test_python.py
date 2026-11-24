@@ -227,6 +227,27 @@ class TestErrors(unittest.TestCase):
         self.assertEqual(kc.Lz4Block(0).decode(b""), b"")
         p = kc.Lz4Block(0)
         self.assertEqual(p.decode(p.encode(b"")), b"")
+        # output beyond the size (literals or a match) is an error
+        for size in (2, 5):
+            with self.assertRaisesRegex(ValueError, "more than %d" % size):
+                kc.Lz4Block(size).decode(b"\x26ab\x02\x00\x10z" if size == 5 else b"\x30abc")
+        # a short block followed by padding: the padding is read as sequences
+        with self.assertRaises(ValueError):
+            kc.Lz4Block(100).decode(b"\x30abc" + b"\x00" * 16)
+        for bad in (-1, 1.5, "10", None, True):
+            with self.subTest(size=bad):
+                with self.assertRaises(ValueError):
+                    kc.Lz4Block(bad)
+
+    def test_lz4_block_literal_encoder(self):
+        from kaitai.compress.lz4_block import _encode_literals
+        import lz4.block
+        for n in (0, 1, 14, 15, 16, 269, 270, 271, 1000, 70000):
+            with self.subTest(n=n):
+                data = bytes((i * 37) & 0xFF for i in range(n))
+                enc = _encode_literals(data)
+                self.assertEqual(kc.Lz4Block(n).decode(enc), data)
+                self.assertEqual(lz4.block.decompress(enc, uncompressed_size=n), data)
 
     def test_gzip_concatenated_members(self):
         g = kc.Gzip()

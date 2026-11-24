@@ -230,6 +230,9 @@ describe 'error handling' do
       expect { LB.new(100).decode("\x10a\x05\x00".b) }.to raise_error(E, /offset/)
       expect { LB.new(100).decode("\x10a\x00\x00".b) }.to raise_error(E, /offset/)
       expect { LB.new(5).decode("\x26ab\x02\x00\x10z".b) }.to raise_error(E, /more than 5/)
+      expect { LB.new(2).decode("\x30abc".b) }.to raise_error(E, /more than 2/)
+      expect { LB.new(100).decode("\x30abc".b + "\0".b * 16) }.to raise_error(E, /offset/)
+      [-1, 1.5, '10', nil].each { |bad| expect { LB.new(bad) }.to raise_error(ArgumentError, /non-negative integer/) }
     end
 
     it 'encodes long literal runs' do

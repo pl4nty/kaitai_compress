@@ -246,6 +246,23 @@ describe('kaitai_compress', function() {
             assertBytesEqual(new Lz4Block(100).decode(new Uint8Array([0x30, 0x61, 0x62, 0x63])), new Uint8Array([0x61, 0x62, 0x63]));
             assert.throws(function() { new Lz4Block(100).decode(new Uint8Array([0x10, 0x61, 0x05, 0x00])); }, /offset/);
             assert.throws(function() { new Lz4Block(100).decode(new Uint8Array([0x10, 0x61, 0x00, 0x00])); }, /offset/);
+            assert.throws(function() { new Lz4Block(2).decode(new Uint8Array([0x30, 0x61, 0x62, 0x63])); }, /more than 2/);
+            assert.throws(function() { new Lz4Block(100).decode(concat(new Uint8Array([0x30, 0x61, 0x62, 0x63]), new Uint8Array(16))); }, /offset/);
+            [-1, 1.5, '10', undefined, null, NaN].forEach(function(bad) {
+                assert.throws(function() { new Lz4Block(bad); }, /non-negative integer/);
+            });
+            // a huge declared size is not allocated up front
+            var big = new Lz4Block(0x7fffffff).decode(new Uint8Array([0x30, 0x61, 0x62, 0x63]));
+            assertBytesEqual(big, new Uint8Array([0x61, 0x62, 0x63]));
+            assert.ok(big.buffer.byteLength < 4096);
+            // output that grows well past the initial buffer
+            var runs = new Uint8Array([0x1f, 0x61, 0x01, 0x00]);
+            var ext = new Uint8Array(400).fill(0xff);
+            var many = concat(concat(runs, ext), new Uint8Array([0x00]));
+            var n = 1 + 15 + 255 * 400 + 4;
+            var dec = new Lz4Block(n).decode(many);
+            assert.strictEqual(dec.length, n);
+            assert.ok(dec.every(function(b) { return b === 0x61; }));
             [0, 14, 15, 269, 270, 1000].forEach(function(n) {
                 var data = new Uint8Array(n).map(function(_, i) { return (i * 37) & 0xff; });
                 assertBytesEqual(new Lz4Block(n).decode(new Lz4Block(n).encode(data)), data);
