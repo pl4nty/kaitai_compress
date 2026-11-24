@@ -1,13 +1,16 @@
-# Optional PyPI: isal (faster drop-in replacement for zlib)
+import zlib
+
+# Optional PyPI: isal, a faster drop-in for decompression. Encoding always uses
+# zlib so output does not depend on which libraries are installed.
 try:
-    from isal import isal_zlib as zlib
+    from isal import isal_zlib as _inflate
 except ImportError:
-    import zlib
+    _inflate = zlib
 
 
 class Zlib:
     def decode(self, data):
-        return zlib.decompress(data)
+        return _inflate.decompress(data)
 
     def encode(self, data):
         return zlib.compress(data)
