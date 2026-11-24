@@ -1,8 +1,9 @@
 import lzma
 
-class LzmaXz:
-    def __init__(self):
-        self.decompressor = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
 
+class LzmaXz:
     def decode(self, data):
-        return self.decompressor.decompress(data)
+        return lzma.decompress(data, format=lzma.FORMAT_XZ)
+
+    def encode(self, data):
+        return lzma.compress(data, format=lzma.FORMAT_XZ)
