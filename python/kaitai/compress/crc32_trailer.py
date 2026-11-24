@@ -1,4 +1,3 @@
-import struct
 import zlib
 
 
@@ -18,11 +17,11 @@ class Crc32Trailer:
         return zlib.crc32(data[:-4] + self.salt)
 
     def decode(self, data):
-        expected = self._crc(data)
-        (actual,) = struct.unpack("<I", data[-4:])
-        if actual != expected:
-            raise ValueError("crc32_trailer: CRC mismatch: stored 0x%08x, computed 0x%08x" % (actual, expected))
+        stored = int.from_bytes(data[-4:], "little")
+        computed = self._crc(data)
+        if stored != computed:
+            raise ValueError("crc32_trailer: CRC mismatch: stored 0x%08x, computed 0x%08x" % (stored, computed))
         return data
 
     def encode(self, data):
-        return bytes(data[:-4]) + struct.pack("<I", self._crc(data))
+        return bytes(data[:-4]) + self._crc(data).to_bytes(4, "little")
