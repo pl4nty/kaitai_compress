@@ -4,6 +4,10 @@ source 'https://rubygems.org'
 gem 'kaitai-struct', '~> 0.11'
 gem 'rspec', '~> 3'
 
+# OpenSSL::Provider (needed to load the legacy provider for DES) arrived in
+# openssl gem 3.2; Ruby 3.2 bundles 3.1.
+gem 'openssl', '>= 3.2'
+
 # Compression libraries used by ruby/lib/kaitai/compress
 gem 'brotli'
 gem 'bzip2-ffi'
