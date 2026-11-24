@@ -7,6 +7,10 @@ module Kaitai
       def decode(data)
         ::Brotli::inflate(data)
       end
+
+      def encode(data)
+        ::Brotli::deflate(data)
+      end
     end
   end
 end
