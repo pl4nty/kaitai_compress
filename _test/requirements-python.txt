@@ -1,0 +1,7 @@
+kaitaistruct==0.11
+brotli
+lz4
+zstandard
+python-snappy
+pycryptodome
+isal

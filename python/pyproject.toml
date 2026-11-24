@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaitai-compress"
+version = "0.1.0"
+description = "Compression, checksum and encryption processes for Kaitai Struct"
+readme = { text = "Compression, checksum and encryption processes for Kaitai Struct (`process: kaitai.compress.*`).", content-type = "text/markdown" }
+license = { text = "MIT" }
+requires-python = ">=3.8"
+classifiers = ["License :: OSI Approved :: MIT License"]
+dependencies = []
+
+[project.optional-dependencies]
+brotli = ["brotli"]
+lz4 = ["lz4"]
+zstd = ["zstandard"]
+snappy = ["python-snappy"]
+crypto = ["pycryptodome"]
+isal = ["isal"]
+all = ["kaitai-compress[brotli,lz4,zstd,snappy,crypto,isal]"]
+
+[project.urls]
+Homepage = "https://github.com/kaitai-io/kaitai_compress"
+
+[tool.setuptools.packages.find]
+include = ["kaitai.compress"]
+namespaces = true
