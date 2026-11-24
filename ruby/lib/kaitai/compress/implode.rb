@@ -27,11 +27,11 @@
 #
 #   Mark Adler    madler@alumni.caltech.edu
 
+require 'kaitai/compress/error'
+
 module Kaitai
   module Compress
     class Implode
-      class DecodeError < StandardError; end
-
       MAXBITS = 13 # maximum code length
 
       # Build a canonical Huffman table [count, symbol] from run-length coded
@@ -72,9 +72,9 @@ module Kaitai
         @bitcnt = 0
 
         lit = bits(8)
-        raise DecodeError, "implode: literal flag must be 0 or 1, got #{lit}" if lit > 1
+        raise Error, "implode: literal flag must be 0 or 1, got #{lit}" if lit > 1
         dict = bits(8)
-        raise DecodeError, "implode: dictionary size code must be 4..6, got #{dict}" unless (4..6).include?(dict)
+        raise Error, "implode: dictionary size code must be 4..6, got #{dict}" unless (4..6).include?(dict)
 
         out = [] # output bytes
         loop do
@@ -86,7 +86,7 @@ module Kaitai
 
             symbol = len == 2 ? 2 : dict
             dist = (huff(DISTCODE) << symbol) + bits(symbol) + 1
-            raise DecodeError, 'implode: distance too far back' if dist > out.size
+            raise Error, 'implode: distance too far back' if dist > out.size
 
             # byte-wise forward copy, which also handles overlapping copies
             from = out.size - dist
@@ -104,7 +104,7 @@ module Kaitai
         val = @bitbuf
         while @bitcnt < need
           byte = @data.getbyte(@pos)
-          raise DecodeError, 'implode: unexpected end of input' if byte.nil?
+          raise Error, 'implode: unexpected end of input' if byte.nil?
           val |= byte << @bitcnt
           @pos += 1
           @bitcnt += 8
@@ -127,7 +127,7 @@ module Kaitai
           first = (first + cnt) << 1
           code <<= 1
         end
-        raise DecodeError, 'implode: invalid Huffman code'
+        raise Error, 'implode: invalid Huffman code'
       end
     end
   end

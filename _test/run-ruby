@@ -16,7 +16,8 @@ AES_CBC = ['aes', 'cbc', '0123456789abcdef', 'fedcba9876543210', 'pkcs7']
 AES_ECB = ['aes', 'ecb', (0..0x1f).to_a.pack('C*')]
 
 # class: process class name; tests: [ksy class, compressed file ext];
-# args: constructor args; exact: encode(uncompressed) must equal the test file
+# args: constructor args; exact: encode(uncompressed) must equal the test file;
+# trailer: bytes that decode leaves after the body and encode overwrites
 PROCESSES = [
   {class: 'Brotli', tests: [['TestBrotli', 'br']]},
   {class: 'Lz4', tests: [['TestLz4', 'lz4']]},
@@ -31,7 +32,7 @@ PROCESSES = [
   {class: 'Snappy', tests: [['TestSnappy', 'raw.sz']]},
   {class: 'SnappyFramed', tests: [['TestSnappyFramed', 'framing2.sz']]},
   {class: 'Implode', tests: [['TestImplodeAscii', 'ascii.implode'], ['TestImplodeBinary', 'binary.implode']]},
-  {class: 'Crc32Trailer', args: ['B1gS'], exact: true, tests: [['TestCrc32Trailer', 'crc32_trailer']]},
+  {class: 'Crc32Trailer', args: ['B1gS'], exact: true, trailer: 4, tests: [['TestCrc32Trailer', 'crc32_trailer']]},
   {class: 'BlockCipher', args: DES_CBC, exact: true, tests: [['TestDesCbc', 'des_cbc']]},
   {class: 'BlockCipher', args: AES_CBC, exact: true, tests: [['TestAesCbc', 'aes_cbc']]},
   {class: 'BlockCipher', args: AES_ECB, exact: true, tests: [['TestAesEcb', 'aes_ecb']]},
@@ -55,6 +56,8 @@ end
 PROCESSES.each { |pr|
   cls, missing = load_process(pr[:class])
   args = pr[:args] || []
+  trailer = "\0".b * (pr[:trailer] || 0)
+  body = ->(decoded) { decoded.byteslice(0, decoded.bytesize - trailer.bytesize) }
 
   pr[:tests].each { |ksy_class, ext|
     describe "#{ksy_class} (#{ext})" do
@@ -69,14 +72,12 @@ PROCESSES.each { |pr|
 
         it "decodes #{name} directly" do
           out = cls.new(*args).decode(File.binread("compressed/#{name}.#{ext}"))
-          out = out.byteslice(0, out.bytesize - 4) if pr[:class] == 'Crc32Trailer'
-          expect(out).to eq data
+          expect(body.(out)).to eq data
         end
 
         if pr[:exact]
-          input = pr[:class] == 'Crc32Trailer' ? data + "\0\0\0\0".b : data
           it "encodes #{name} to the exact test file" do
-            expect(cls.new(*args).encode(input)).to eq File.binread("compressed/#{name}.#{ext}")
+            expect(cls.new(*args).encode(data + trailer)).to eq File.binread("compressed/#{name}.#{ext}")
           end
         end
       }
@@ -90,10 +91,7 @@ PROCESSES.each { |pr|
     (UNCOMPRESSED.to_a + [['empty', ''.b]]).each { |name, data|
       it "round-trips #{name}" do
         obj = cls.new(*args)
-        skip "#{pr[:class]} has no encode" unless obj.respond_to?(:encode)
-        data += "\0\0\0\0".b if pr[:class] == 'Crc32Trailer'
-        decoded = obj.decode(obj.encode(data))
-        expect(decoded).to eq(pr[:class] == 'Crc32Trailer' ? obj.encode(data) : data)
+        expect(body.(obj.decode(obj.encode(data + trailer)))).to eq data
       end
     }
   end
@@ -101,7 +99,7 @@ PROCESSES.each { |pr|
 
 describe 'Implode' do
   it 'is decode only' do
-    expect(Kaitai::Compress::Implode.new).to respond_to(:decode)
+    expect(Kaitai::Compress::Implode.new).not_to respond_to(:encode)
   end
 end
 
@@ -127,8 +125,9 @@ describe 'error handling' do
       expect { crc.encode("abc") }.to raise_error(E, /at least 4/)
     end
 
-    it 'accepts a byte array salt' do
-      expect(Kaitai::Compress::Crc32Trailer.new([0x42, 0x31, 0x67, 0x53].pack('C*')).decode(file('90_a.crc32_trailer'))).to eq file('90_a.crc32_trailer')
+    it 'accepts a byte array salt and returns the data unchanged' do
+      data = file('90_a.crc32_trailer')
+      expect(Kaitai::Compress::Crc32Trailer.new([0x42, 0x31, 0x67, 0x53].pack('C*')).decode(data)).to eq data
     end
   end
 
@@ -207,10 +206,16 @@ describe 'error handling' do
     end
   end
 
+  context 'Implode' do
+    it 'raises on truncated input' do
+      expect { Kaitai::Compress::Implode.new.decode(file('ascii_text.ascii.implode')[0, 20]) }.to raise_error(E, /end of input/)
+    end
+  end
+
   context 'LzmaRaw' do
     before { (reason = load_process('LzmaRaw')[1]) and skip reason }
     it 'raises on truncated input' do
-      expect { Kaitai::Compress::LzmaRaw.new.decode(file('ascii_text.lzma_raw')[0, 20]) }.to raise_error(E)
+      expect { Kaitai::Compress::LzmaRaw.new.decode(file('ascii_text.lzma_raw')[0, 20]) }.to raise_error(E, /truncated/)
     end
   end
 end
