@@ -27,6 +27,12 @@ var PROCESSES = [
     { parser: 'TestSnappyFramed', process: 'SnappyFramed', args: [], ext: 'framing2.sz', encode: 'roundtrip' },
     { parser: 'TestImplodeAscii', process: 'Implode', args: [], ext: 'ascii.implode' },
     { parser: 'TestImplodeBinary', process: 'Implode', args: [], ext: 'binary.implode' },
+    { parser: 'TestDeflateNsis', process: 'DeflateNsis', args: [], ext: 'nsis.deflate', encode: 'roundtrip' },
+    { parser: 'TestDeflateNsis2', process: 'DeflateNsis', args: [], ext: 'nsis2.deflate', encode: 'roundtrip' },
+    { parser: 'TestBz2Nsis', process: 'Bz2Nsis', args: [], ext: 'nsis.bz2', encode: 'none' },
+    { parser: 'TestLzmaProps', process: 'LzmaProps', args: [], ext: 'lzma_props', encode: 'none' },
+    { parser: 'TestCrc32Chunks', process: 'Crc32Chunks', args: [4096], ext: 'crc32_chunks', encode: 'exact' },
+    { parser: 'TestInstallshield', process: 'Installshield', args: ['Setup.ini', true], ext: 'installshield', encode: 'exact' },
     { parser: 'TestCrc32Trailer', process: 'Crc32Trailer', args: ['B1gS'], ext: 'crc32_trailer', encode: 'exact' },
     { parser: 'TestDesCbc', process: 'BlockCipher', args: ['des', 'cbc', 'S3crtMsG', 'S3crtMsG'], ext: 'des_cbc', encode: 'exact' },
     { parser: 'TestAesCbc', process: 'BlockCipher', args: ['aes', 'cbc', '0123456789abcdef', 'fedcba9876543210', 'pkcs7'], ext: 'aes_cbc', encode: 'exact' },
@@ -191,6 +197,47 @@ describe('kaitai_compress', function() {
             // CRC-32 of "123456789" is 0xcbf43926
             var check = new Crc32Trailer().encode(new Uint8Array([49, 50, 51, 52, 53, 54, 55, 56, 57, 0, 0, 0, 0]));
             assertBytesEqual(check.subarray(9), new Uint8Array([0x26, 0x39, 0xf4, 0xcb]));
+        });
+
+        it('NSIS and Inno Setup processes: edge cases and errors', function() {
+            var DeflateNsis = require('kaitai-compress/DeflateNsis').DeflateNsis;
+            var Bz2Nsis = require('kaitai-compress/Bz2Nsis').Bz2Nsis;
+            var LzmaProps = require('kaitai-compress/LzmaProps').LzmaProps;
+            var Crc32Chunks = require('kaitai-compress/Crc32Chunks').Crc32Chunks;
+            var Installshield = require('kaitai-compress/Installshield').Installshield;
+            var text = uncompressed('ascii_text');
+            // NSIS 2 stored block (no NLEN), then a fixed-Huffman final block
+            assertBytesEqual(new DeflateNsis().decode(new Uint8Array([0, 3, 0, 97, 98, 99, 3, 0])), new Uint8Array([97, 98, 99]));
+            [[], [7], [1, 5, 0, 97, 98]].forEach(function(bad) {
+                assert.throws(function() { new DeflateNsis().decode(new Uint8Array(bad)); }, /DeflateNsis/);
+            });
+            var bz = compressed('ascii_text', 'nsis.bz2');
+            assertBytesEqual(new Bz2Nsis().decode(concat(bz, new Uint8Array([1, 2, 3]))), text);
+            assertBytesEqual(new Bz2Nsis().decode(new Uint8Array([0x17])), new Uint8Array(0));
+            ['3100000080008000400080a028aaaaaaaaaaaaaab170', '3100000080008000400080a028aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac5c'].forEach(function(bomb) {
+                assert.throws(function() { new Bz2Nsis().decode(Uint8Array.from(Buffer.from(bomb, 'hex'))); }, /too big/);
+            });
+            assert.throws(function() { new Bz2Nsis().decode(bz.subarray(0, bz.length - 2)); }, /Bz2Nsis/);
+            assert.throws(function() { new Bz2Nsis().decode(new Uint8Array([0x42])); }, /signature/);
+            var lp = compressed('ascii_text', 'lzma_props');
+            assertBytesEqual(new LzmaProps().decode(concat(lp, new Uint8Array(8).fill(0xFF))), text);
+            assertBytesEqual(new LzmaProps(true).decode(concat(new Uint8Array([0]), lp)), text);
+            assertBytesEqual(new LzmaProps(true).decode(readFile('bcj/x86_code.lzma_props')), readFile('bcj/x86_code.bin'));
+            assert.throws(function() { new LzmaProps(true).decode(concat(new Uint8Array([2]), lp)); }, /filter flag/);
+            assert.throws(function() { new LzmaProps().decode(new Uint8Array([0x5d, 0])); }, /truncated/);
+            assert.throws(function() { new LzmaProps().decode(lp.subarray(0, lp.length - 1)); }, /truncated/);
+            assert.throws(function() { new LzmaProps().decode(lp.subarray(0, 8)); }, /truncated/);
+            assert.throws(function() { new LzmaProps().decode(concat(new Uint8Array([0x2c]), lp.subarray(1))); }, /lc \+ lp/);
+            var chunks = new Uint8Array(compressed('25k_uuids', 'crc32_chunks'));
+            chunks[5000] ^= 1;
+            assert.throws(function() { new Crc32Chunks(4096).decode(chunks); }, /offset 4100/);
+            assert.throws(function() { new Crc32Chunks(4096).decode(new Uint8Array(4)); }, /truncated/);
+            [0, -1, 1.5, '4096', null].forEach(function(bad) {
+                assert.throws(function() { new Crc32Chunks(bad); }, /positive integer/);
+            });
+            assert.throws(function() { new Installshield(''); }, /empty/);
+            var is = new Installshield('\u00e9t\u00e9.ini');
+            assertBytesEqual(new Installshield(new TextEncoder().encode('\u00e9t\u00e9.ini')).decode(is.encode(text)), text);
         });
 
         it('SnappyFramed: CRC mismatch', function() {

@@ -35,6 +35,11 @@ PROCESSES = [
   {class: 'Snappy', tests: [['TestSnappy', 'raw.sz']]},
   {class: 'SnappyFramed', tests: [['TestSnappyFramed', 'framing2.sz']]},
   {class: 'Implode', tests: [['TestImplodeAscii', 'ascii.implode'], ['TestImplodeBinary', 'binary.implode']]},
+  {class: 'DeflateNsis', tests: [['TestDeflateNsis', 'nsis.deflate'], ['TestDeflateNsis2', 'nsis2.deflate']]},
+  {class: 'Bz2Nsis', tests: [['TestBz2Nsis', 'nsis.bz2']]},
+  {class: 'LzmaProps', tests: [['TestLzmaProps', 'lzma_props']]},
+  {class: 'Crc32Chunks', args: [4096], exact: true, tests: [['TestCrc32Chunks', 'crc32_chunks']]},
+  {class: 'Installshield', args: ['Setup.ini', true], exact: true, tests: [['TestInstallshield', 'installshield']]},
   {class: 'Crc32Trailer', args: ['B1gS'], exact: true, trailer: 4, tests: [['TestCrc32Trailer', 'crc32_trailer']]},
   {class: 'BlockCipher', args: DES_CBC, exact: true, tests: [['TestDesCbc', 'des_cbc']]},
   {class: 'BlockCipher', args: AES_CBC, exact: true, tests: [['TestAesCbc', 'aes_cbc']]},
@@ -90,7 +95,7 @@ PROCESSES.each { |pr|
     end
   }
 
-  next if pr[:class] == 'Implode' # decode only
+  next if %w[Implode Bz2Nsis].include?(pr[:class]) # decode only
   describe "#{pr[:class]}#{args.empty? ? '' : " #{args.first(2).inspect}"} encode" do
     before { skip missing } if missing
 
@@ -103,9 +108,10 @@ PROCESSES.each { |pr|
   end
 }
 
-describe 'Implode' do
-  it 'is decode only' do
+describe 'Implode and Bz2Nsis' do
+  it 'are decode only' do
     expect(Kaitai::Compress::Implode.new).not_to respond_to(:encode)
+    expect(Kaitai::Compress::Bz2Nsis.new).not_to respond_to(:encode)
   end
 end
 
@@ -246,6 +252,55 @@ describe 'error handling' do
   context 'Implode' do
     it 'raises on truncated input' do
       expect { Kaitai::Compress::Implode.new.decode(file('ascii_text.ascii.implode')[0, 20]) }.to raise_error(E, /end of input/)
+    end
+  end
+
+  context 'NSIS and Inno Setup processes' do
+    it 'Bz2Nsis ignores trailing data and rejects bad input' do
+      expect(Kaitai::Compress::Bz2Nsis.new.decode(file('ascii_text.nsis.bz2') + 'trailing')).to eq UNCOMPRESSED['ascii_text']
+      expect(Kaitai::Compress::Bz2Nsis.new.decode("\x17".b)).to eq ''
+      %w[3100000080008000400080a028aaaaaaaaaaaaaab170 3100000080008000400080a028aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac5c].each do |bomb|
+        expect { Kaitai::Compress::Bz2Nsis.new.decode([bomb].pack('H*')) }.to raise_error(E, /too big/)
+      end
+      ["".b, "\x42".b, file('ascii_text.nsis.bz2')[0..-3]].each { |bad|
+        expect { Kaitai::Compress::Bz2Nsis.new.decode(bad) }.to raise_error(E)
+      }
+    end
+
+    it 'DeflateNsis reads NSIS 2 stored blocks and rejects bad input' do
+      expect(Kaitai::Compress::DeflateNsis.new.decode("\x00\x03\x00abc\x03\x00".b)).to eq 'abc'
+      ["".b, "\x07".b, "\x01\x05\x00ab".b, file('ascii_text.nsis.deflate')[0..-4]].each { |bad|
+        expect { Kaitai::Compress::DeflateNsis.new.decode(bad) }.to raise_error(E)
+      }
+    end
+
+    it 'LzmaProps handles the filter flag, trailing data and bad input' do
+      stream = file('ascii_text.lzma_props')
+      expect(Kaitai::Compress::LzmaProps.new.decode(stream + "\xff".b * 8)).to eq UNCOMPRESSED['ascii_text']
+      expect(Kaitai::Compress::LzmaProps.new(true).decode("\x00".b + stream)).to eq UNCOMPRESSED['ascii_text']
+      bcj = File.binread('bcj/x86_code.lzma_props')
+      expect(Kaitai::Compress::LzmaProps.new(true).decode(bcj)).to eq File.binread('bcj/x86_code.bin')
+      expect(Kaitai::Compress::LzmaProps.new(true).decode("\x00".b + bcj.byteslice(1..))).not_to eq File.binread('bcj/x86_code.bin')
+      expect { Kaitai::Compress::LzmaProps.new(true).decode("\x02".b + stream) }.to raise_error(E, /filter flag/)
+      expect { Kaitai::Compress::LzmaProps.new.decode("\x5d\x00".b) }.to raise_error(E, /truncated/)
+      expect { Kaitai::Compress::LzmaProps.new.decode("\xff".b + stream[1..]) }.to raise_error(E, /properties/)
+      expect { Kaitai::Compress::LzmaProps.new.decode("\x2c".b + stream[1..]) }.to raise_error(E, /lc \+ lp/)
+      expect { Kaitai::Compress::LzmaProps.new.decode(stream[0...-1]) }.to raise_error(E)
+      expect { Kaitai::Compress::LzmaProps.new.decode(stream[0, 8]) }.to raise_error(E)
+    end
+
+    it 'Crc32Chunks reports the bad chunk' do
+      data = file('25k_uuids.crc32_chunks')
+      data.setbyte(5000, data.getbyte(5000) ^ 1)
+      expect { Kaitai::Compress::Crc32Chunks.new(4096).decode(data) }.to raise_error(E, /offset 4100/)
+      expect { Kaitai::Compress::Crc32Chunks.new(4096).decode("\0".b * 4) }.to raise_error(E, /truncated/)
+      [0, -1, 1.5, '4096', nil].each { |bad| expect { Kaitai::Compress::Crc32Chunks.new(bad) }.to raise_error(ArgumentError) }
+    end
+
+    it 'Installshield keys on the UTF-8 name' do
+      expect { Kaitai::Compress::Installshield.new('') }.to raise_error(ArgumentError)
+      is = Kaitai::Compress::Installshield.new("\u00e9t\u00e9.ini")
+      expect(Kaitai::Compress::Installshield.new("\u00e9t\u00e9.ini".b).decode(is.encode('hello'))).to eq 'hello'
     end
   end
 

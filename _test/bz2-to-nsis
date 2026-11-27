@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Rewrite a bzip2 stream (stdin) in NSIS's framing (stdout).
+
+NSIS's bzip2 drops the "BZh" header, replaces each 48-bit block magic and
+32-bit block CRC with the byte 0x31, drops the "randomised" bit, and ends
+with the byte 0x17 instead of the end-of-stream magic and combined CRC.
+Blocks are found by searching the bit stream for the block magic, as
+bzip2recover does, so this does not decode anything.
+"""
+import sys
+
+BLOCK, END = 0x314159265359, 0x177245385090
+
+data = sys.stdin.buffer.read()
+assert data[:3] == b"BZh"
+bits = bin(int.from_bytes(data[4:], "big"))[2:].zfill(len(data[4:]) * 8)
+block, end = format(BLOCK, "048b"), format(END, "048b")
+starts = []
+pos = 0
+while True:
+    i = bits.find(block, pos)
+    if i < 0:
+        break
+    starts.append(i)
+    pos = i + 48
+stop = bits.find(end, starts[-1] + 48)
+out = []
+for i, start in enumerate(starts):
+    body_end = starts[i + 1] if i + 1 < len(starts) else stop
+    out.append("00110001" + bits[start + 48 + 32 + 1:body_end])
+out.append("00010111")
+s = "".join(out)
+s += "0" * (-len(s) % 8)
+sys.stdout.buffer.write(int(s, 2).to_bytes(len(s) // 8, "big"))

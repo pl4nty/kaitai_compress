@@ -47,4 +47,31 @@ for I in uncompressed/*.dat; do
 
 	echo "$BASE.des_cbc $BASE.aes_cbc $BASE.aes_ecb $BASE.crc32_trailer"
 	python3 -c "import sys, zlib; from Crypto.Cipher import DES, AES; from Crypto.Util.Padding import pad; d = open(sys.argv[1], 'rb').read(); b = sys.argv[2]; open(b + '.des_cbc', 'wb').write(DES.new(b'S3crtMsG', DES.MODE_CBC, iv=b'S3crtMsG').encrypt(pad(d, 8))); open(b + '.aes_cbc', 'wb').write(AES.new(b'0123456789abcdef', AES.MODE_CBC, iv=b'fedcba9876543210').encrypt(pad(d, 16))); open(b + '.aes_ecb', 'wb').write(AES.new(bytes(range(32)), AES.MODE_ECB).encrypt(pad(d, 16))); open(b + '.crc32_trailer', 'wb').write(d + zlib.crc32(d + b'B1gS').to_bytes(4, 'little'))" $I compressed/$BASE
+
+	echo "$BASE.nsis.deflate $BASE.nsis2.deflate"  # NSIS 3 (stock raw deflate) and NSIS 2 (stored blocks without NLEN)
+	python3 -c "import sys, zlib; d = open(sys.argv[1], 'rb').read(); b = sys.argv[2]; c = zlib.compressobj(9, zlib.DEFLATED, -15); open(b + '.nsis.deflate', 'wb').write(c.compress(d) + c.flush()); c = zlib.compressobj(0, zlib.DEFLATED, -15); s = c.compress(d) + c.flush(); o = bytearray(); p = 0
+while p < len(s): n = int.from_bytes(s[p + 1:p + 3], 'little'); o += s[p:p + 3] + s[p + 5:p + 5 + n]; p += 5 + n
+open(b + '.nsis2.deflate', 'wb').write(o)" $I compressed/$BASE
+
+	echo "$BASE.nsis.bz2"
+	bzip2 -9 <$I | ./bz2-to-nsis >compressed/$BASE.nsis.bz2
+
+	echo "$BASE.lzma_props"  # .lzma (alone) without its 8-byte uncompressed size
+	xz --format=lzma --lzma1=preset=6 <$I | python3 -c "import sys; d = sys.stdin.buffer.read(); sys.stdout.buffer.write(d[:5] + d[13:])" >compressed/$BASE.lzma_props
+
+	echo "$BASE.crc32_chunks $BASE.installshield"
+	python3 -c "import sys, zlib; d = open(sys.argv[1], 'rb').read(); b = sys.argv[2]; open(b + '.crc32_chunks', 'wb').write(b''.join(zlib.crc32(d[i:i + 4096]).to_bytes(4, 'little') + d[i:i + 4096] for i in range(0, len(d), 4096))); k = bytes(c ^ m for c, m in zip(b'Setup.ini', b'\x13\x35\x86\x07' * 3)); r = lambda x: (x << 4 | x >> 4) & 255; open(b + '.installshield', 'wb').write(bytes(r(~d[i] & 255 ^ k[i % 1024 % len(k)]) for i in range(len(d))))" $I compressed/$BASE
 done
+
+# BCJ x86 test vector for lzma_props with the NSIS filter flag: rel32 calls
+# among random bytes, filter flag 1, LZMA1 properties (lc=3 lp=0 pb=2,
+# 64 KiB), then raw x86 + LZMA1 data from liblzma.
+python3 -c "
+import lzma, random
+random.seed(7)
+code = b''.join(bytes([0xe8]) + random.randrange(0, 1 << 20).to_bytes(4, 'little') if i % 3 else bytes(random.getrandbits(8) for _ in range(5)) for i in range(400))
+props = bytes([93]) + (1 << 16).to_bytes(4, 'little')
+x86 = lzma.compress(code, lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_X86}, {'id': lzma.FILTER_LZMA1, 'dict_size': 1 << 16}])
+open('bcj/x86_code.bin', 'wb').write(code)
+open('bcj/x86_code.lzma_props', 'wb').write(b'\x01' + props + x86)
+"

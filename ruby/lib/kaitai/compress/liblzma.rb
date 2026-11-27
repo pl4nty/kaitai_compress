@@ -20,6 +20,8 @@ module Kaitai
       # LZMA_VLI_UNKNOWN.
       Filter = L.struct ["uint64_t id", "void* options"]
       FILTER_LZMA2 = 0x21
+      FILTER_LZMA1 = 0x4000000000000001
+      FILTER_X86 = 0x04
       VLI_UNKNOWN = L::UINT64_MAX
 
       PRESET = 6
@@ -53,6 +55,27 @@ module Kaitai
       def raw_encode(data)
         code(data) { |stream, options| L.lzma_raw_encoder(stream, lzma2_filters(options)) }
       end
+
+      # Raw LZMA1 with the given properties byte and dictionary size, after
+      # the BCJ x86 filter if `x86`. The stream must end with an end marker.
+      def lzma1_decode(data, props, dict_size, x86)
+        lc, lp, pb = props % 9, props / 9 % 5, props / 45
+        code(data) { |stream, options|
+          options[0, 4] = [dict_size].pack('L')
+          options[LC_OFFSET, 12] = [lc, lp, pb].pack('L3')
+          L.lzma_raw_decoder(stream, filters(options, FILTER_LZMA1, x86))
+        }
+      end
+
+      # Raw LZMA1 with the preset's properties (lc=3, lp=0, pb=2, 8 MiB),
+      # with an end marker.
+      def lzma1_encode(data)
+        code(data) { |stream, options| L.lzma_raw_encoder(stream, filters(options, FILTER_LZMA1, false)) }
+      end
+
+      # Offset of lc in lzma_options_lzma: after dict_size, preset_dict and
+      # preset_dict_size.
+      LC_OFFSET = 2 * Fiddle::SIZEOF_VOIDP + 4
 
       # Runs all of `data` through a coder. The block initialises it: it gets
       # the lzma_stream pointer and a pointer to the preset's
@@ -89,13 +112,18 @@ module Kaitai
 
       # lzma_filter[2]: a single LZMA2 filter with the given options.
       def lzma2_filters(options)
-        chain = buffer(2 * Filter.size)
-        lzma2 = Filter.new(chain)
-        lzma2.id = FILTER_LZMA2
-        lzma2.options = options
-        terminator = Filter.new(chain + Filter.size)
-        terminator.id = VLI_UNKNOWN
-        terminator.options = nil
+        filters(options, FILTER_LZMA2, false)
+      end
+
+      # A filter chain: BCJ x86 first if `x86`, then the LZMA filter `id`.
+      def filters(options, id, x86)
+        ids = (x86 ? [[FILTER_X86, nil]] : []) + [[id, options], [VLI_UNKNOWN, nil]]
+        chain = buffer(ids.size * Filter.size)
+        ids.each_with_index { |(filter_id, filter_options), i|
+          f = Filter.new(chain + i * Filter.size)
+          f.id = filter_id
+          f.options = filter_options
+        }
         chain
       end
 
