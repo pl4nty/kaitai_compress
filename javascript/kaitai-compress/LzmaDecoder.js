@@ -361,6 +361,28 @@
         return out.result();
     }
 
+    // LZMA1 data after 5 property bytes (properties byte, u4le dictionary
+    // size) starting at data[pos], with no uncompressed size, ending with an
+    // end marker.
+    function decodeLzmaProps(data, pos) {
+        if (data.length - pos < 5) {
+            throw new Error("LZMA: truncated properties");
+        }
+        if (data[pos] >= 9 * 5 * 5) {
+            throw new Error("LZMA: invalid properties byte 0x" + data[pos].toString(16));
+        }
+        if (data[pos] % 9 + Math.floor(data[pos] / 9) % 5 > 4) {
+            throw new Error("LZMA: lc + lp > 4 is not supported");
+        }
+        var out = new Output((data.length - pos) * 4);
+        var dec = new LzmaDecoder(out);
+        dec.setProperties(data[pos]);
+        dec.resetState();
+        dec.initRange(data, pos + 5, data.length);
+        dec.decode(Infinity, true);
+        return out.result();
+    }
+
     // Raw LZMA2 stream in data[pos..end), ending with a 0x00 control byte.
     // Returns {data: Uint8Array, end: position after the end byte}.
     function decodeLzma2(data, pos, end) {
@@ -436,6 +458,7 @@
 
     return {
         decodeLzmaAlone: decodeLzmaAlone,
+        decodeLzmaProps: decodeLzmaProps,
         decodeLzma2: decodeLzma2
     };
 }));

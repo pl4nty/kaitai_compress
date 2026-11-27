@@ -9,6 +9,7 @@ Run from _test/: see run-python.
 """
 
 import importlib
+import lzma
 import itertools
 import os
 import unittest
@@ -38,6 +39,12 @@ CASES = {
     "test_zlib": ("zlib", kc.Zlib()),
     "test_zstd": ("zst", kc.Zstd()),
     "test_implode_ascii": ("ascii.implode", None),
+    "test_deflate_nsis": ("nsis.deflate", kc.DeflateNsis()),
+    "test_deflate_nsis2": ("nsis2.deflate", kc.DeflateNsis()),
+    "test_bz2_nsis": ("nsis.bz2", None),
+    "test_lzma_props": ("lzma_props", kc.LzmaProps()),
+    "test_crc32_chunks": ("crc32_chunks", kc.Crc32Chunks(4096)),
+    "test_installshield": ("installshield", kc.Installshield("Setup.ini", True)),
     "test_implode_binary": ("binary.implode", None),
     "test_des_cbc": ("des_cbc", kc.BlockCipher("des", "cbc", "S3crtMsG", "S3crtMsG")),
     "test_aes_cbc": ("aes_cbc", kc.BlockCipher("aes", "cbc", "0123456789abcdef", "fedcba9876543210", "pkcs7")),
@@ -93,7 +100,7 @@ class TestProcesses(unittest.TestCase):
                 # The stream has a fixed size: learn it from a dry run of the same encoder.
                 written = write(obj, len(process.encode(expected)))
                 self.assertEqual(parse(cls, written).body, expected)
-                if isinstance(process, kc.BlockCipher):  # deterministic, unlike compressors
+                if isinstance(process, (kc.BlockCipher, kc.Crc32Chunks, kc.Installshield)):  # deterministic
                     self.assertEqual(written, compressed)
 
     def test_lz4_block(self):
@@ -157,6 +164,84 @@ class TestErrors(unittest.TestCase):
                     raw.encode(data)
                 with self.assertRaises(ValueError):
                     raw.decode(data)
+
+    def test_bz2_nsis(self):
+        with self.assertRaisesRegex(NotImplementedError, "bz2_nsis"):
+            kc.Bz2Nsis().encode(b"data")
+        data = read("compressed", "ascii_text.nsis.bz2")
+        self.assertEqual(kc.Bz2Nsis().decode(data + b"trailing"), read("uncompressed", "ascii_text.dat"))
+        for bad in (b"", b"\x42", data[:-2]):
+            with self.assertRaises(ValueError):
+                kc.Bz2Nsis().decode(bad)
+        self.assertEqual(kc.Bz2Nsis().decode(b"\x17"), b"")
+        # a block with only an end-of-block symbol
+        self.assertEqual(kc.Bz2Nsis().decode(bytes.fromhex("3100000080008000400080a028c5c0")), b"")
+        # runs longer than a block are rejected before they are written out
+        for bomb in ("3100000080008000400080a028aaaaaaaaaaaaaab170", "3100000080008000400080a028aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac5c"):
+            with self.assertRaisesRegex(ValueError, "too big"):
+                kc.Bz2Nsis().decode(bytes.fromhex(bomb))
+
+    def test_deflate_nsis(self):
+        # NSIS 2 stored block (no NLEN), then a fixed-Huffman final block
+        self.assertEqual(kc.DeflateNsis().decode(b"\x00\x03\x00abc\x03\x00"), b"abc")
+        # bytes after the final block are ignored
+        self.assertEqual(kc.DeflateNsis().decode(read("compressed", "90_a.nsis.deflate") + b"xx"),
+                         read("uncompressed", "90_a.dat"))
+        for bad in (b"", b"\x07", b"\x01\x05\x00ab", read("compressed", "ascii_text.nsis.deflate")[:-3]):
+            with self.subTest(data=bad):
+                with self.assertRaises(ValueError):
+                    kc.DeflateNsis().decode(bad)
+
+    def test_lzma_props(self):
+        data = read("uncompressed", "ascii_text.dat")
+        stream = read("compressed", "ascii_text.lzma_props")
+        # stops at the end marker, ignoring what follows
+        self.assertEqual(kc.LzmaProps().decode(stream + b"\xff" * 8), data)
+        # BCJ x86 filter flag (NSIS): 0 = none, 1 = x86
+        self.assertEqual(kc.LzmaProps(True).decode(b"\x00" + stream), data)
+        bcj = read("bcj", "x86_code.lzma_props")
+        self.assertEqual(kc.LzmaProps(True).decode(bcj), read("bcj", "x86_code.bin"))
+        self.assertNotEqual(kc.LzmaProps(True).decode(b"\x00" + bcj[1:]), read("bcj", "x86_code.bin"))
+        props = bytes([93]) + (1 << 16).to_bytes(4, "little")
+        raw = lzma.compress(data, lzma.FORMAT_RAW, filters=[{"id": lzma.FILTER_LZMA1, "dict_size": 1 << 16}])
+        self.assertEqual(kc.LzmaProps().decode(props + raw), data)
+        # truncated (no end marker)
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            kc.LzmaProps().decode(props + raw[:-1])
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            kc.LzmaProps().decode(props + raw[:3])
+        # lc + lp > 4
+        with self.assertRaisesRegex(ValueError, "lc \\+ lp"):
+            kc.LzmaProps().decode(b"\x2c" + stream[1:])
+        for bad in (b"", b"\x5d\x00", b"\xff" + stream[1:]):
+            with self.subTest(data=bad):
+                with self.assertRaises(ValueError):
+                    kc.LzmaProps().decode(bad)
+        with self.assertRaises(ValueError):
+            kc.LzmaProps(True).decode(b"\x02" + stream)
+
+    def test_crc32_chunks(self):
+        data = bytearray(read("compressed", "25k_uuids.crc32_chunks"))
+        self.assertEqual(kc.Crc32Chunks(4096).decode(b""), b"")
+        data[5000] ^= 1
+        with self.assertRaisesRegex(ValueError, "offset 4100"):
+            kc.Crc32Chunks(4096).decode(bytes(data))
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            kc.Crc32Chunks(4096).decode(b"\x00\x00\x00\x00")
+        for bad in (0, -1, 1.5, "4096", None, True):
+            with self.subTest(size=bad):
+                with self.assertRaises(ValueError):
+                    kc.Crc32Chunks(bad)
+
+    def test_installshield(self):
+        data = read("uncompressed", "25k_uuids.dat")
+        unchunked = kc.Installshield(b"Setup.ini")
+        self.assertNotEqual(unchunked.decode(read("compressed", "25k_uuids.installshield")), data)
+        self.assertEqual(unchunked.decode(unchunked.encode(data)), data)
+        # the key is the UTF-8 name
+        self.assertEqual(kc.Installshield("\u00e9t\u00e9.ini").key, kc.Installshield("\u00e9t\u00e9.ini".encode()).key)
+        with self.assertRaises(ValueError):
+            kc.Installshield("")
 
     def test_implode_cannot_encode(self):
         with self.assertRaisesRegex(NotImplementedError, "implode"):
